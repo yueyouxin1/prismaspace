@@ -1,0 +1,14 @@
+[
+  {
+    "name": "platform",
+    "label": "平台官方"
+  },
+  {
+    "name": "openai",
+    "label": "OpenAI"
+  },
+  {
+    "name": "aliyun",
+    "label": "阿里云通义"
+  }
+]

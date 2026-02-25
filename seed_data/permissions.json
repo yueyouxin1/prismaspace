@@ -1,0 +1,533 @@
+[
+  {
+    "name": "platform",
+    "label": "平台管理",
+    "description": "平台级超级管理员权限根节点",
+    "type": "ability",
+    "is_assignable": false,
+    "children": [
+      {
+        "name": "platform:user:impersonate",
+        "label": "[Admin] 模拟用户登录",
+        "description": "以特定用户身份登录，用于调试和客户支持。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:billing:manage_all",
+        "label": "[Admin] 管理所有计费",
+        "description": "查看和修改任何用户或团队的计费信息。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:workspace:manage_all",
+        "label": "[Admin] 管理所有资源",
+        "description": "查看、暂停或删除平台上的任何空间。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:resourcetype:manage",
+        "label": "[Admin] 管理资源类型",
+        "description": "创建、更新或删除平台支持的资源类型。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:permission:manage",
+        "label": "[Admin] 管理权限定义",
+        "description": "创建、更新或删除平台的所有权限定义。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:product:manage",
+        "label": "[Admin] 管理产品目录",
+        "description": "创建、更新或下线平台上的所有产品、权益和价格。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:servicemodule:manage",
+        "label": "[Admin] 管理服务模块",
+        "description": "添加、更新或下线平台提供的AI能力。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:marketplace:manage",
+        "label": "管理官方市场",
+        "description": "审核及管理官方市场。",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "platform:audit:activity_log:read",
+        "label": "查看用户行为日志",
+        "type": "api",
+        "is_assignable": false
+      }
+    ]
+  },
+  {
+    "name": "user",
+    "label": "个人账户域",
+    "description": "管理用户个人账户的权限根节点",
+    "type": "ability",
+    "is_assignable": false,
+    "children": [
+      {
+        "name": "user:profile:read",
+        "label": "查看个人资料",
+        "type": "api",
+        "is_assignable": false,
+        "children": [
+          {
+            "name": "user:profile:write",
+            "label": "修改个人资料",
+            "type": "api",
+            "is_assignable": false
+          }
+        ]
+      },
+      {
+        "name": "user:security:write",
+        "label": "修改安全设置",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "user:account:delete",
+        "label": "删除个人账户",
+        "type": "api",
+        "is_assignable": false
+      },
+      {
+        "name": "user:apikey:read",
+        "label": "查看个人API密钥",
+        "type": "api",
+        "is_assignable": false,
+        "children": [
+          {
+            "name": "user:apikey:create",
+            "label": "创建个人API密钥",
+            "type": "api",
+            "is_assignable": false
+          },
+          {
+            "name": "user:apikey:delete",
+            "label": "吊销个人API密钥",
+            "type": "api",
+            "is_assignable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "team",
+    "label": "团队域",
+    "description": "管理团队的权限根节点",
+    "type": "ability",
+    "is_assignable": true,
+    "children": [
+      {
+        "name": "team:create",
+        "label": "创建团队",
+        "description": "允许用户创建一个新的团队。",
+        "type": "api",
+        "is_assignable": true
+      },
+      {
+        "name": "team:read",
+        "label": "查看团队信息",
+        "description": "读取团队的基本信息。",
+        "type": "api",
+        "is_assignable": true,
+        "children": [
+          {
+            "name": "team:update",
+            "label": "更新团队信息",
+            "type": "api",
+            "is_assignable": true
+          },
+          {
+            "name": "team:delete",
+            "label": "删除团队",
+            "type": "api",
+            "is_assignable": false
+          },
+          {
+            "name": "team:member:read",
+            "label": "查看团队成员",
+            "type": "api",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "team:member:invite",
+                "label": "邀请新成员",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "team:member:remove",
+                "label": "移除团队成员",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "team:member:role:update",
+                "label": "修改成员角色",
+                "type": "api",
+                "is_assignable": true
+              }
+            ]
+          },
+          {
+            "name": "team:role:read",
+            "label": "查看团队角色",
+            "type": "api",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "team:role:write",
+                "label": "管理团队角色",
+                "type": "api",
+                "is_assignable": false
+              }
+            ]
+          },
+          {
+            "name": "team:apikey:read",
+            "label": "查看团队API密钥",
+            "type": "api",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "team:apikey:create",
+                "label": "创建团队API密钥",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "team:apikey:delete",
+                "label": "吊销团队API密钥",
+                "type": "api",
+                "is_assignable": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "billing",
+    "label": "计费域",
+    "description": "管理计费和订阅的权限根节点",
+    "type": "ability",
+    "is_assignable": false,
+    "children": [
+      {
+        "name": "billing:read",
+        "label": "查看计费信息",
+        "type": "api",
+        "is_assignable": false,
+        "children": [
+          {
+            "name": "billing:manage",
+            "label": "管理订阅与支付",
+            "type": "api",
+            "is_assignable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "servicemodule",
+    "label": "服务模块域",
+    "description": "使用平台核心AI能力的权限根节点",
+    "type": "ability",
+    "is_assignable": true,
+    "children": []
+  },
+  {
+    "name": "workspace",
+    "label": "工作空间域",
+    "description": "管理工作空间的权限根节点",
+    "type": "ability",
+    "is_assignable": true,
+    "children": [
+      {
+        "name": "workspace:create",
+        "label": "创建工作空间",
+        "type": "api",
+        "is_assignable": true
+      },
+      {
+        "name": "workspace:read",
+        "label": "访问工作空间",
+        "description": "能够看到并进入一个工作空间。这是所有空间内操作的基础。",
+        "type": "ability",
+        "is_assignable": true,
+        "children": [
+          {
+            "name": "workspace:update",
+            "label": "更新工作空间设置",
+            "type": "api",
+            "is_assignable": true
+          },
+          {
+            "name": "workspace:delete",
+            "label": "删除工作空间",
+            "type": "api",
+            "is_assignable": true
+          },
+          {
+            "name": "workspace:credential:servicemodule:read",
+            "label": "查看空间服务凭证",
+            "type": "api",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "workspace:credential:servicemodule:create",
+                "label": "创建空间服务凭证",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "workspace:credential:servicemodule:update",
+                "label": "更新空间服务凭证",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "workspace:credential:servicemodule:delete",
+                "label": "删除空间服务凭证",
+                "type": "api",
+                "is_assignable": true
+              }
+            ]
+          },
+          {
+            "name": "workspace:asset:read",
+            "label": "查看空间资产",
+            "type": "ability",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "workspace:asset:create",
+                "label": "创建资产",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "workspace:asset:update",
+                "label": "更新资产",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "workspace:asset:delete",
+                "label": "删除资产",
+                "type": "api",
+                "is_assignable": true
+              }
+            ]
+          },
+          {
+            "name": "project",
+            "label": "项目域",
+            "description": "管理项目的权限根节点",
+            "type": "ability",
+            "is_assignable": true,
+            "children": [
+              {
+                "name": "project:create",
+                "label": "创建项目",
+                "type": "api",
+                "is_assignable": true
+              },
+              {
+                "name": "project:read",
+                "label": "访问项目",
+                "description": "能够看到并打开一个项目。这是所有项目内操作的基础。",
+                "type": "ability",
+                "is_assignable": true,
+                "children": [
+                  {
+                    "name": "project:update",
+                    "label": "更新项目设置",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:delete",
+                    "label": "删除项目",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:publish",
+                    "label": "发布项目",
+                    "type": "api",
+                    "is_assignable": true,
+                    "children": [
+                      {
+                        "name": "project:publish:marketplace",
+                        "label": "发布项目到市场",
+                        "type": "api",
+                        "is_assignable": true
+                      },
+                      {
+                        "name": "project:publish:api",
+                        "label": "发布项目到API",
+                        "type": "api",
+                        "is_assignable": true
+                      }
+                    ]
+                  },
+                  {
+                    "name": "project:template:create",
+                    "label": "创建项目模板",
+                    "description": "将一个现有项目保存为模板。",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:template:use",
+                    "label": "使用项目模板",
+                    "description": "从一个模板创建一个新的项目。",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:share",
+                    "label": "分享项目",
+                    "description": "允许用户与特定用户或通过链接分享项目。",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:comment:read",
+                    "label": "查看项目评论",
+                    "description": "读取项目中的评论。",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "project:comment:write",
+                    "label": "发表项目评论",
+                    "description": "在项目中添加、编辑或删除自己的评论。",
+                    "type": "api",
+                    "is_assignable": true
+                  },
+                  {
+                    "name": "resource",
+                    "label": "资源域",
+                    "description": "管理资源的权限根节点",
+                    "type": "ability",
+                    "is_assignable": true,
+                    "children": [
+                      {
+                        "name": "resource:create",
+                        "label": "创建资源",
+                        "type": "api",
+                        "is_assignable": true
+                      },
+                      {
+                        "name": "resource:read",
+                        "label": "访问资源",
+                        "type": "api",
+                        "is_assignable": true,
+                        "children": [
+                          {
+                            "name": "resource:update",
+                            "label": "编辑资源",
+                            "type": "api",
+                            "is_assignable": true
+                          },
+                          {
+                            "name": "resource:delete",
+                            "label": "删除资源",
+                            "type": "api",
+                            "is_assignable": true
+                          },
+                          {
+                            "name": "resource:publish",
+                            "label": "发布资源",
+                            "type": "api",
+                            "is_assignable": true,
+                            "children": [
+                              {
+                                "name": "resource:publish:marketplace",
+                                "label": "发布资源到市场",
+                                "type": "api",
+                                "is_assignable": true
+                              },
+                              {
+                                "name": "resource:publish:api",
+                                "label": "发布到API",
+                                "type": "api",
+                                "is_assignable": true
+                              }
+                            ]
+                          },
+                          {
+                            "name": "resource:execute",
+                            "label": "执行/调用资源",
+                            "type": "api",
+                            "is_assignable": true
+                          },
+                          {
+                            "name": "resource:share",
+                            "label": "分享资源",
+                            "description": "允许用户分享项目中的单个资源。",
+                            "type": "api",
+                            "is_assignable": true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "audit",
+    "label": "审计域",
+    "description": "审计与日志查看的权限根节点",
+    "type": "ability",
+    "is_assignable": true,
+    "children": [
+      {
+        "name": "audit:trace:read",
+        "label": "查看应用调用日志",
+        "type": "api",
+        "is_assignable": true
+      }
+    ]
+  },
+  {
+    "name": "ui",
+    "label": "UI域",
+    "description": "前端界面交互权限根节点",
+    "type": "ability",
+    "is_assignable": true,
+    "children": [
+      {
+        "name": "page:dashboard",
+        "label": "访问仪表盘",
+        "type": "page",
+        "is_assignable": true
+      }
+    ]
+  }
+]

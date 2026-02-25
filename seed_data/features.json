@@ -1,0 +1,61 @@
+[
+  {
+    "name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+    "label": "Qwen Plus Input Tokens",
+    "type": "metered",
+    "feature_role": "llm_input",
+    "service_module_version_name": "qwen-plus-2025-09-11"
+  },
+  {
+    "name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+    "label": "Qwen Plus Output Tokens",
+    "type": "metered",
+    "feature_role": "llm_output",
+    "service_module_version_name": "qwen-plus-2025-09-11"
+  },
+  {
+    "name": "llm:tokens:input:openai:gpt-4o-2024-05-13",
+    "label": "GPT-4o Input Tokens",
+    "type": "metered",
+    "feature_role": "llm_input",
+    "service_module_version_name": "gpt-4o-2024-05-13"
+  },
+  {
+    "name": "llm:tokens:output:openai:gpt-4o-2024-05-13",
+    "label": "GPT-4o Output Tokens",
+    "type": "metered",
+    "feature_role": "llm_output",
+    "service_module_version_name": "gpt-4o-2024-05-13"
+  },
+  {
+    "name": "embedding:tokens:aliyun:text-embedding-v4",
+    "label": "Embedding Tokens (text-embedding-v4)",
+    "type": "metered",
+    "feature_role": "embedding_token",
+    "service_module_version_name": "text-embedding-v4"
+  },
+  {
+    "name": "limit:tool:custom:execution",
+    "label": "Tool Execution Limit",
+    "type": "metered",
+    "service_module_version_name": null
+  },
+  {
+    "name": "tool:platform:business_info_query_latest:execution",
+    "label": "Tool business_info_query_latest Execution",
+    "type": "metered",
+    "service_module_version_name": "business_info_query_latest"
+  },
+  {
+    "name": "limit:team_members",
+    "label": "Team Members Limit",
+    "type": "quota",
+    "service_module_version_name": null
+  },
+  {
+    "name": "storage:gb",
+    "label": "Storage (GB)",
+    "type": "quota",
+    "service_module_version_name": null
+  }
+]

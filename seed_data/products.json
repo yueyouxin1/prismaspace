@@ -1,0 +1,193 @@
+[
+  {
+    "name": "plan:free",
+    "label": "Free Plan",
+    "description": "For individuals starting out.",
+    "type": "membership",
+    "plan_tier": "plan:free",
+    "granted_role_name": "plan:free",
+    "is_purchasable": false, 
+    "entitlements": [
+      {
+        "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+        "quota": 100000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+        "quota": 50000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "limit:tool:custom:execution",
+        "quota": 100,
+        "is_resettable": true
+      }
+    ],
+    "prices": [{ "amount": "0.00", "currency": "CNY", "billing_cycle": "month" }]
+  },
+  {
+    "name": "plan:pro",
+    "label": "Pro Plan",
+    "description": "For advanced creators with higher demands.",
+    "type": "membership",
+    "plan_tier": "plan:pro",
+    "granted_role_name": "plan:pro",
+    "is_purchasable": true,
+    "entitlements": [
+      {
+        "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+        "quota": 1000000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+        "quota": 500000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "limit:tool:custom:execution",
+        "quota": 100,
+        "is_resettable": true
+      }
+    ],
+    "prices": [
+      { "amount": "20.00", "currency": "CNY", "billing_cycle": "month" },
+      { "amount": "200.00", "currency": "CNY", "billing_cycle": "year" }
+    ]
+  },
+  {
+    "name": "plan:team",
+    "label": "Team Plan",
+    "description": "For collaborative projects and businesses.",
+    "type": "membership",
+    "plan_tier": "plan:team",
+    "granted_role_name": "plan:team",
+    "is_purchasable": true,
+    "entitlements": [
+      {
+        "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+        "quota": 5000000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+        "quota": 2500000,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "limit:team_members",
+        "quota": 100,
+        "is_resettable": false
+      },
+      {
+        "feature_name": "limit:tool:custom:execution",
+        "quota": 100,
+        "is_resettable": true
+      }
+    ],
+    "prices": [
+      { "amount": "50.00", "currency": "CNY", "billing_cycle": "month" },
+      { "amount": "500.00", "currency": "CNY", "billing_cycle": "year" }
+    ]
+  },
+  {
+    "name": "plan:enterprise",
+    "label": "Enterprise Plan",
+    "description": "Custom solutions for large organizations. Contact us.",
+    "type": "membership",
+    "plan_tier": "plan:enterprise",
+    "granted_role_name": "plan:enterprise",
+    "is_purchasable": false,
+    "entitlements": [
+       {
+        "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+        "quota": 99999999,
+        "is_resettable": true
+      },
+      {
+        "feature_name": "limit:team_members",
+        "quota": 1000,
+        "is_resettable": false
+      },
+      {
+        "feature_name": "limit:tool:custom:execution",
+        "quota": 100,
+        "is_resettable": true
+      }
+    ],
+    "prices": [{ "amount": "500.00", "currency": "CNY", "billing_cycle": "month" }]
+  },
+  {
+    "name": "addon:qwen-plus:1m_tokens",
+    "label": "Qwen Plus Tokens (1M)",
+    "type": "add_on",
+    "is_purchasable": true,
+    "entitlements": [{ "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11", "quota": 1000000, "is_resettable": true }, { "feature_name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11", "quota": 1000000, "is_resettable": true }],
+    "prices": [{ "amount": "1.00", "currency": "CNY", "billing_cycle": "month" }]
+  },
+  {
+    "name": "onetime:gpt-4o:1m_tokens",
+    "label": "GPT-4o Tokens Pack (1M)",
+    "type": "one_time",
+    "is_purchasable": true,
+    "entitlements": [{ "feature_name": "llm:tokens:input:openai:gpt-4o-2024-05-13", "quota": 1000000, "is_resettable": false }, { "feature_name": "llm:tokens:output:openai:gpt-4o-2024-05-13", "quota": 1000000, "is_resettable": true }],
+    "prices": [{ "amount": "5.00", "currency": "CNY" }]
+  },
+  {
+    "name": "usage:llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+    "label": "Qwen Plus Input Tokens (Pay-as-you-go)",
+    "type": "usage",
+    "feature_name": "llm:tokens:input:aliyun:qwen-plus-2025-09-11",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.001", "currency": "CNY", "unit": "token", "unit_count": 1000 }]
+  },
+  {
+    "name": "usage:llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+    "label": "Qwen Plus Output Tokens (Pay-as-you-go)",
+    "type": "usage",
+    "feature_name": "llm:tokens:output:aliyun:qwen-plus-2025-09-11",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.002", "currency": "CNY", "unit": "token", "unit_count": 1000 }]
+  },
+  {
+    "name": "usage:llm:tokens:input:openai:gpt-4o-2024-05-13",
+    "label": "GPT-4o Input Tokens (Pay-as-you-go)",
+    "type": "usage",
+    "feature_name": "llm:tokens:input:openai:gpt-4o-2024-05-13",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.005", "currency": "CNY", "unit": "token", "unit_count": 1000 }]
+  },
+  {
+    "name": "usage:llm:tokens:output:openai:gpt-4o-2024-05-13",
+    "label": "GPT-4o Output Tokens (Pay-as-you-go)",
+    "type": "usage",
+    "feature_name": "llm:tokens:output:openai:gpt-4o-2024-05-13",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.015", "currency": "CNY", "unit": "token", "unit_count": 1000 }]
+  },
+  {
+    "name": "usage:embedding:tokens:aliyun:text-embedding-v4",
+    "label": "Embedding Tokens (Pay-as-you-go)",
+    "type": "usage",
+    "feature_name": "embedding:tokens:aliyun:text-embedding-v4",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.0001", "currency": "CNY", "unit": "token", "unit_count": 1000 }]
+  },
+  {
+    "name": "usage:limit:tool:custom:execution",
+    "label": "Tool Execution Limit",
+    "type": "usage",
+    "feature_name": "limit:tool:custom:execution",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.0001", "currency": "CNY", "unit": "call", "unit_count": 1 }]
+  },
+  {
+    "name": "usage:tool:platform:business_info_query_latest:execution",
+    "label": "Tool business_info_query_latest Execution",
+    "type": "usage",
+    "feature_name": "tool:platform:business_info_query_latest:execution",
+    "is_purchasable": false,
+    "prices": [{ "amount": "0.1", "currency": "CNY", "unit": "call", "unit_count": 1 }]
+  }
+]

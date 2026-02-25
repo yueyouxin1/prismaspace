@@ -1,0 +1,102 @@
+[
+  {
+    "name": "plan:free",
+    "label": "Free Plan",
+    "description": "Default permissions for users on the Free plan. Defines base platform capabilities.",
+    "role_type": "system_plan",
+    "parent_name": null,
+    "permissions": [
+      "ui", "page:dashboard",
+      "user", "user:profile:read", "user:profile:write", "user:security:write", "user:account:delete", "user:apikey:read", "user:apikey:create", "user:apikey:delete",
+      "servicemodule",
+      "audit", "audit:trace:read",
+      "workspace", "workspace:create", "workspace:read", "workspace:update", "workspace:delete",
+      "workspace:asset:create", "workspace:asset:read", "workspace:asset:update", "workspace:asset:delete",
+      "project", "project:create", "project:read", "project:update", "project:delete", "project:publish", "project:publish:marketplace", "project:template:create", "project:template:use", "project:share", "project:comment:read", "project:comment:write",
+      "resource", "resource:create", "resource:read", "resource:update", "resource:delete", "resource:publish", "resource:publish:marketplace", "resource:share", "resource:execute",
+      "workspace:credential:servicemodule:read", "workspace:credential:servicemodule:create", "workspace:credential:servicemodule:update", "workspace:credential:servicemodule:delete",
+      "billing", "billing:read", "billing:manage"
+    ]
+  },
+  {
+    "name": "plan:pro",
+    "label": "Pro Plan",
+    "description": "Unlocks advanced publishing features for Pro users.",
+    "role_type": "system_plan",
+    "parent_name": "plan:free",
+    "permissions": [
+      "project:publish:api",
+      "resource:publish:api"
+    ]
+  },
+  {
+    "name": "plan:team",
+    "label": "Team Plan",
+    "description": "Unlocks team creation capabilities for Team plan subscribers.",
+    "role_type": "system_plan",
+    "parent_name": "plan:pro",
+    "permissions": [
+      "team:create"
+    ]
+  },
+  {
+    "name": "plan:enterprise",
+    "label": "Enterprise Plan",
+    "description": "Provides comprehensive capabilities for large organizations.",
+    "role_type": "system_plan",
+    "parent_name": "plan:team",
+    "permissions": []
+  },
+  {
+    "name": "team:member",
+    "label": "Member",
+    "description": "Can create and edit projects and resources within the team, but cannot manage team settings or members.",
+    "role_type": "system_team_template",
+    "parent_name": null,
+    "permissions": [
+      "servicemodule",
+      "audit", "audit:trace:read",
+      "workspace", "workspace:create", "workspace:read", "workspace:update", "workspace:delete",
+      "workspace:asset:create", "workspace:asset:read", "workspace:asset:update", "workspace:asset:delete",
+      "project", "project:create", "project:read", "project:update", "project:delete", "project:publish", "project:publish:marketplace", "project:template:create", "project:template:use", "project:share", "project:comment:read", "project:comment:write",
+      "resource", "resource:create", "resource:read", "resource:update", "resource:delete", "resource:publish", "resource:publish:marketplace", "resource:share", "resource:execute",
+      "workspace:credential:servicemodule:read", "workspace:credential:servicemodule:create", "workspace:credential:servicemodule:update", "workspace:credential:servicemodule:delete",
+      "team", "team:read", "team:member:read"
+    ]
+  },
+  {
+    "name": "team:admin",
+    "label": "Admin",
+    "description": "Can manage projects, resources, and team members, but cannot delete the team or manage billing.",
+    "role_type": "system_team_template",
+    "parent_name": "team:member",
+    "permissions": [
+      "team:update",
+      "team:member:invite", "team:member:remove", "team:member:role:update",
+      "team:role:read", "team:role:write",
+      "team:apikey:read", "team:apikey:create", "team:apikey:delete"
+    ]
+  },
+  {
+    "name": "team:owner",
+    "label": "Owner",
+    "description": "Has ultimate authority over the team, its assets, billing, and members. This role cannot be modified.",
+    "role_type": "system_team_template",
+    "parent_name": "team:admin",
+    "permissions": [
+      "team:delete",
+      "billing", "billing:read", "billing:manage"
+    ]
+  },
+  {
+    "name": "team:billing_manager",
+    "label": "Billing Manager",
+    "description": "Can view and manage the team's subscription and billing information, but cannot access projects or resources.",
+    "role_type": "system_team_template",
+    "parent_name": null,
+    "permissions": [
+      "team:read", "team:member:read",
+      "billing", "billing:read", "billing:manage"
+    ]
+  }
+]

@@ -1,0 +1,120 @@
+[
+  {
+    "module": {
+      "type_name": "llm",
+      "name": "qwen-plus",
+      "label": "qwen-plus",
+      "provider_name": "aliyun",
+      "requires_credential": false
+    },
+    "versions": [
+        {
+          "name": "qwen-plus-2025-09-11",
+          "version_tag": "2025-09-11",
+          "is_default": true,
+          "status": "available",
+          "attributes": {
+            "type": "llm",
+            "client_name": "openai",
+            "context_window": 1000000,
+            "max_output_tokens": 8192
+          },
+          "config": {
+          "type": "llm",
+          "temperature": 0.7,
+          "max_tokens": 2048,
+          "top_p": 0.9,
+          "frequency_penalty": 0.0,
+          "presence_penalty": 0.0,
+          "stop": null,
+          "stream": false
+        }
+      }
+    ]
+  },
+  {
+    "module": {
+      "type_name": "llm",
+      "name": "gpt-4o",
+      "label": "gpt-4o",
+      "provider_name": "openai",
+      "requires_credential": false
+    },
+    "versions": [
+        {
+        "name": "gpt-4o-2024-05-13",
+        "version_tag": "2024-05-13",
+        "status": "available",
+        "attributes": {
+          "type": "llm",
+          "client_name": "openai",
+          "context_window": 128000,
+          "max_output_tokens": 8192,
+          "supported_modalities": ["text", "image"],
+          "tool_calling_support": true
+        },
+        "config": {
+          "type": "llm",
+          "temperature": 0.7,
+          "max_tokens": 4096,
+          "top_p": 1.0,
+          "frequency_penalty": 0.0,
+          "presence_penalty": 0.0,
+          "response_format": { "type": "text" },
+          "seed": null,
+          "stop": null,
+          "stream": false
+        }
+      }
+    ]
+  },
+  {
+    "module": {
+      "type_name": "embedding",
+      "name": "text-embedding",
+      "label": "text-embedding",
+      "provider_name": "aliyun",
+      "requires_credential": false
+    },
+    "versions": [
+        {
+        "name": "text-embedding-v4",
+        "version_tag": "v4",
+        "is_default": true,
+        "status": "available",
+        "attributes": {
+          "type": "embedding",
+          "client_name": "openai",
+          "dimensions": 1024,
+          "max_batch_size": 10,
+          "max_batch_tokens": 8192
+        },
+        "config": {
+            "type": "embedding"
+        }
+      }
+    ]
+  },
+  {
+    "module": {
+      "type_name": "tool",
+      "name": "business_info_query",
+      "label": "business_info_query",
+      "provider_name": "platform",
+      "requires_credential": false
+    },
+    "versions": [
+        {
+        "name": "business_info_query_latest",
+        "version_tag": "latest",
+        "status": "available",
+        "attributes": {
+            "type": "tool"
+        },
+        "config": {
+            "type": "tool"
+        }
+      }
+    ]
+  }
+]
