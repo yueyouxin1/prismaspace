@@ -1,6 +1,6 @@
 # src/app/services/resource/agent/pipeline_manager.py
 
-from typing import List, Optional
+from typing import List, Dict, Optional
 from app.engine.model.llm import LLMMessage, LLMTool
 from app.engine.agent import BaseToolExecutor
 from app.core.context import AppContext
@@ -42,6 +42,7 @@ class AgentPipelineManager:
         dependencies: List[ResourceRef],
         runtime_workspace: Workspace,
         session_manager: Optional[AgentSessionManager],
+        prompt_variables: Optional[Dict]
     ):
         """
         [Standard Pack] 一键装配标准 Agent 所需的所有上下文策略和能力。
@@ -96,7 +97,7 @@ class AgentPipelineManager:
             ))
 
         # 2.3 Memory Variable Tools (memory_get, memory_set)
-        if session_manager:
+        if session_manager and prompt_variables:
             self._skill_processors.append(MemoryVarSkillsProcessor(
                 app_context, 
                 session_manager

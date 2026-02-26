@@ -96,6 +96,25 @@ class TenantTableUpdate(TenantTableBase):
     
     # 允许传入一个完整的列列表，服务层将进行同步
     columns: Optional[List[Union[TenantColumnUpdate, TenantColumnCreate]]] = None
+
+    @field_validator('columns')
+    @classmethod
+    def validate_update_columns(cls, v: Optional[List[Union[TenantColumnUpdate, TenantColumnCreate]]]):
+        if v is None:
+            return v
+
+        seen_names = set()
+        system_reserved_names = {'id', 'created_at'}
+
+        for column in v:
+            lowered = column.name.lower()
+            if lowered in system_reserved_names:
+                raise ValueError(f"Column name '{column.name}' is reserved by the system.")
+            if lowered in seen_names:
+                raise ValueError(f"Duplicate column name '{column.name}' found.")
+            seen_names.add(lowered)
+
+        return v
     
 class TenantTableRead(TenantTableBase):
     uuid: str

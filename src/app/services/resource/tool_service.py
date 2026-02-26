@@ -158,11 +158,7 @@ class ToolService(ResourceImplementationService):
         update_dict = validated_data.model_dump(exclude_unset=True)
         
         for key, value in update_dict.items():
-            # 如果字段是 HttpUrl 类型，将其转换为字符串
-            if key == 'url' and value is not None:
-                setattr(instance, key, str(value))
-            else:
-                setattr(instance, key, value)
+            setattr(instance, key, value)
             
         return instance
 

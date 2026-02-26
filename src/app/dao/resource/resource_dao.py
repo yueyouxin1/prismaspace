@@ -8,6 +8,7 @@ from app.dao.base_dao import BaseDao
 from app.models.workspace import Workspace
 from app.models.identity import User
 from app.models.resource import Resource, ResourceInstance, ResourceType
+from app.models.resource.tenantdb import TenantDB
 from app.services.exceptions import NotFoundError
 
 
@@ -165,6 +166,10 @@ class ResourceDao(BaseDao[Resource]):
                 joinedload(Resource.resource_type).options(
                     lazyload("*"),
                     load_only(ResourceType.id, ResourceType.name)
+                ),
+                joinedload(Resource.workspace_instance.of_type(TenantDB)).options(
+                    lazyload("*"),
+                    load_only(TenantDB.schema_name)
                 ),
                 *self.detail_instance_pointer_loaders
             )

@@ -1,9 +1,10 @@
 # src/app/schemas/interaction/chat_schemas.py
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.models.interaction.chat import MessageRole
+from app.models.interaction.chat import ChatSession
 
 # --- Session Schemas ---
 
@@ -14,12 +15,30 @@ class ChatSessionCreate(BaseModel):
 class ChatSessionRead(BaseModel):
     uuid: str
     title: Optional[str]
-    agent_instance_uuid: str = Field(..., alias="agent_instance.uuid")
+    agent_instance_uuid: str
     message_count: int
     updated_at: datetime
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='before')
+    @classmethod
+    def pre_process_orm_obj(cls, data: Any) -> Any:
+        if not isinstance(data, ChatSession):
+            return data
+
+        agent_instance = getattr(data, "agent_instance", None)
+        agent_instance_uuid = getattr(agent_instance, "uuid", None)
+
+        return {
+            "uuid": data.uuid,
+            "title": data.title,
+            "agent_instance_uuid": agent_instance_uuid,
+            "message_count": data.message_count,
+            "updated_at": data.updated_at,
+            "created_at": data.created_at,
+        }
 
 class ChatSessionUpdate(BaseModel):
     title: Optional[str] = None

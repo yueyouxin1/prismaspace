@@ -1,6 +1,6 @@
 # app/schemas/resource/tool_schemas.py
 
-from pydantic import BaseModel, Field, ConfigDict, model_validator, HttpUrl
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 from typing import Optional, Dict, Any, List 
 from app.models.resource.tool import Tool
 from .resource_schemas import InstanceUpdate, InstanceRead
@@ -10,11 +10,24 @@ from app.schemas.common import ExecutionRequest, ExecutionResponse
 
 class ToolSchema(BaseModel):
     """Tool特有的、可被编辑的实现细节。"""
-    url: Optional[HttpUrl] = Field(None, description="工具的API端点URL")
+    url: Optional[str] = Field(None, description="工具的API端点URL")
     method: str = Field("GET", description="HTTP请求方法 (GET, POST, etc.)")
     inputs_schema: List[ParameterSchema] = Field(default_factory=dict, description="输入参数的JSON Schema")
     outputs_schema: List[ParameterSchema] = Field(default_factory=dict, description="输出结果的JSON Schema")
     llm_function_schema: Optional[Dict[str, Any]] = Field(None, description="提供给大语言模型的Function Calling Schema")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        # Preserve template placeholders like {city}; only validate scheme.
+        if not (trimmed.startswith("http://") or trimmed.startswith("https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return trimmed
 
 class ToolUpdate(ToolSchema, InstanceUpdate):
     """用于更新一个Tool实例的Schema。"""

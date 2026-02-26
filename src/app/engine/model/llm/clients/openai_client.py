@@ -183,6 +183,7 @@ class OpenAIClient(LLMClientBase):
             extra_body["thinking_budget"] = run_config.thinking_budget
 
         try:
+            print(f"DEFBUG-api_params: {api_params}")
             response = await self.client.chat.completions.create(**api_params, extra_body=extra_body)
             
             if run_config.stream:

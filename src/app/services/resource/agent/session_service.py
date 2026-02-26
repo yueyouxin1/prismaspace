@@ -56,10 +56,9 @@ class SessionService(BaseService):
             title=create_data.title or "New Chat"
         )
         await self.session_dao.add(session)
-        
-        # 重新加载以填充 agent_instance 关系
-        fresh_session = await self.session_dao.get_one(where={"id": session.id}, withs=["agent_instance"])
-        return ChatSessionRead.model_validate(fresh_session)
+
+        # 直接构建响应，避免依赖 ORM 关系懒加载/别名路径解析。
+        return self._to_session_read(session, create_data.agent_instance_uuid)
 
     async def list_sessions(self, agent_instance_uuid: str, page: int, limit: int, actor: User) -> List[ChatSessionRead]:
         """列出当前用户在某个 Agent 版本下的历史会话"""
@@ -73,7 +72,17 @@ class SessionService(BaseService):
             page=page, 
             limit=limit
         )
-        return [ChatSessionRead.model_validate(s) for s in sessions]
+        return [self._to_session_read(session, agent_instance_uuid) for session in sessions]
+
+    def _to_session_read(self, session: ChatSession, agent_instance_uuid: str) -> ChatSessionRead:
+        return ChatSessionRead.model_validate({
+            "uuid": session.uuid,
+            "title": session.title,
+            "agent_instance_uuid": agent_instance_uuid,
+            "message_count": session.message_count,
+            "updated_at": session.updated_at,
+            "created_at": session.created_at,
+        })
 
     async def get_session(self, session_uuid: str, actor: User) -> ChatSession:
         """[Internal] 获取并鉴权会话实体"""

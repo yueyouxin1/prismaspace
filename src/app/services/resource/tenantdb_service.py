@@ -2,6 +2,7 @@
 
 import uuid
 import re
+import json
 from decimal import Decimal
 from pydantic import ValidationError
 from typing import Any, Dict, Optional, List, Set, Tuple, Union
@@ -36,6 +37,8 @@ class TenantDbService(ResourceImplementationService):
 
     # --- [REFACTOR 1] 添加PostgreSQL保留关键字列表 (这是一个简化列表，生产环境应更全面)
     PG_RESERVED_WORDS: Set[str] = { "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric", "authorization", "binary", "both", "case", "cast", "check", "collate", "column", "concurrently", "constraint", "create", "cross", "current_catalog", "current_date", "current_role", "current_time", "current_timestamp", "current_user", "default", "deferrable", "desc", "distinct", "do", "else", "end", "except", "false", "fetch", "for", "foreign", "freeze", "from", "full", "grant", "group", "having", "ilike", "in", "initially", "inner", "intersect", "into", "is", "isnull", "join", "lateral", "leading", "left", "like", "limit", "localtime", "localtimestamp", "natural", "not", "notnull", "null", "offset", "on", "only", "or", "order", "outer", "overlaps", "placing", "primary", "references", "returning", "right", "select", "session_user", "similar", "some", "symmetric", "table", "tablesample", "then", "to", "trailing", "true", "union", "unique", "user", "using", "variadic", "verbose", "when", "where", "window", "with" }
+    IDENTIFIER_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+    SYSTEM_RESERVED_NAMES: Set[str] = {"id", "created_at"}
 
     def __init__(self, context: AppContext):
         super().__init__(context)
@@ -47,7 +50,18 @@ class TenantDbService(ResourceImplementationService):
     # 核心辅助函数，用于DML操作
     def _get_sqlalchemy_table_object(self, table_meta: TenantTable, schema: str) -> Table:
         """Dynamically builds a complete SQLAlchemy Table object from our ORM metadata."""
-        columns = [Column(c.name, self._map_type(c.data_type)) for c in table_meta.columns]
+        columns: List[Column] = []
+        for c in table_meta.columns:
+            col_kwargs: Dict[str, Any] = {
+                "primary_key": bool(c.is_primary_key),
+                "nullable": bool(c.is_nullable),
+                "unique": bool(c.is_unique),
+            }
+            if c.name == "created_at" and c.default_value is None:
+                col_kwargs["server_default"] = text("CURRENT_TIMESTAMP")
+            elif c.default_value is not None:
+                col_kwargs["server_default"] = text(self._literal_sql(c.default_value, c.data_type))
+            columns.append(Column(c.name, self._map_type(c.data_type), **col_kwargs))
         return Table(table_meta.name, MetaData(), *columns, schema=schema)
 
     # --- [全新] 数据执行 (DML) 核心逻辑 ---
@@ -498,50 +512,88 @@ class TenantDbService(ResourceImplementationService):
     # --- [全新] DDL辅助函数 ---
 
     async def _sync_columns(self, schema_name: str, table_meta: TenantTable, desired_columns_data: List[Union[TenantColumnCreate, TenantColumnUpdate]]):
-        current_cols_by_uuid = {str(c.uuid): c for c in table_meta.columns if not c.is_primary_key and c.name != 'created_at'}
+        current_cols_by_uuid = {
+            str(c.uuid): c
+            for c in table_meta.columns
+            if not c.is_primary_key and c.name != 'created_at'
+        }
         to_update_map = {str(c.uuid): c for c in desired_columns_data if hasattr(c, 'uuid') and c.uuid}
         to_add_list = [c for c in desired_columns_data if not (hasattr(c, 'uuid') and c.uuid)]
         uuids_to_delete = set(current_cols_by_uuid.keys()) - set(to_update_map.keys())
 
-        # --- Phase 1: Column Structure Sync ---
+        self._validate_column_sync_payload(desired_columns_data)
+
+        # --- Phase 1: Column Structure & Constraints Sync ---
         async with tenant_data_engine.begin() as conn:
             for col_uuid in uuids_to_delete:
                 col_to_delete = current_cols_by_uuid[col_uuid]
                 await self._execute_alter_table(conn, schema_name, table_meta.name, 'DROP', col_to_delete)
                 await self.db.delete(col_to_delete)
-            
+
             for new_col_data in to_add_list:
                 self._validate_identifier(new_col_data.name)
                 new_col_meta = TenantColumn(**new_col_data.model_dump(), table_id=table_meta.id)
                 await self._execute_alter_table(conn, schema_name, table_meta.name, 'ADD', new_col_meta)
+                await self._sync_column_nullable(conn, schema_name, table_meta.name, new_col_meta.name, new_col_meta.is_nullable)
+                await self._sync_column_default(conn, schema_name, table_meta.name, new_col_meta.name, new_col_meta.data_type, new_col_meta.default_value)
+                await self._sync_column_unique(conn, schema_name, table_meta.name, new_col_meta.name, new_col_meta.is_unique)
                 self.db.add(new_col_meta)
 
             for col_uuid, desired_state in to_update_map.items():
                 current_state = current_cols_by_uuid.get(col_uuid)
-                if not current_state: continue
-                
+                if not current_state:
+                    continue
+
                 if desired_state.name != current_state.name:
                     self._validate_identifier(desired_state.name)
                     await self._execute_rename_column(conn, schema_name, table_meta.name, current_state.name, desired_state.name)
-                
-                # Update ORM state for Phase 2 and for the final response
+
+                effective_col_name = desired_state.name
+
+                if desired_state.data_type != current_state.data_type:
+                    await self._sync_column_type(conn, schema_name, table_meta.name, effective_col_name, desired_state.data_type)
+                if desired_state.is_nullable != current_state.is_nullable:
+                    await self._sync_column_nullable(conn, schema_name, table_meta.name, effective_col_name, desired_state.is_nullable)
+                if desired_state.default_value != current_state.default_value:
+                    await self._sync_column_default(
+                        conn,
+                        schema_name,
+                        table_meta.name,
+                        effective_col_name,
+                        desired_state.data_type,
+                        desired_state.default_value,
+                    )
+                if desired_state.is_unique != current_state.is_unique:
+                    await self._sync_column_unique(conn, schema_name, table_meta.name, effective_col_name, desired_state.is_unique)
+
                 current_state.name = desired_state.name
                 current_state.label = desired_state.label
                 current_state.description = desired_state.description
+                current_state.data_type = desired_state.data_type
+                current_state.is_nullable = desired_state.is_nullable
+                current_state.is_unique = desired_state.is_unique
                 current_state.is_indexed = desired_state.is_indexed
+                current_state.is_vector_enabled = desired_state.is_vector_enabled
+                current_state.default_value = desired_state.default_value
 
         # --- Phase 2: Index Sync ---
         async with tenant_data_engine.begin() as conn:
             def inspect_sync(sync_conn):
                 inspector = inspect(sync_conn)
-                return inspector.get_indexes(table_meta.name, schema=schema_name)
-            
-            existing_indexes = await conn.run_sync(inspect_sync)
-            index_map = {idx['column_names'][0]: idx['name'] for idx in existing_indexes if len(idx['column_names']) == 1}
+                return (
+                    inspector.get_indexes(table_meta.name, schema=schema_name),
+                    inspector.get_unique_constraints(table_meta.name, schema=schema_name),
+                )
 
-            # The desired_columns_data IS the final state
+            existing_indexes, unique_constraints = await conn.run_sync(inspect_sync)
+            unique_constraint_names = {item.get("name") for item in unique_constraints if item.get("name")}
+            index_map = {
+                idx['column_names'][0]: idx['name']
+                for idx in existing_indexes
+                if len(idx['column_names']) == 1 and idx.get('name') not in unique_constraint_names
+            }
+
             for col_state in desired_columns_data:
-                # After phase 1, the name in DB matches col_state.name
                 col_name = col_state.name
                 should_have_index = col_state.is_indexed
                 has_index = col_name in index_map
@@ -607,8 +659,128 @@ class TenantDbService(ResourceImplementationService):
         
         await conn.execute(stmt)
 
+    def _validate_column_sync_payload(self, desired_columns_data: List[Union[TenantColumnCreate, TenantColumnUpdate]]) -> None:
+        seen_names = set()
+        for column in desired_columns_data:
+            self._validate_identifier(column.name)
+            lowered = column.name.lower()
+            if lowered in self.SYSTEM_RESERVED_NAMES:
+                raise ServiceException(f"Column name '{column.name}' is reserved by the system.")
+            if lowered in seen_names:
+                raise ServiceException(f"Duplicate column name '{column.name}' in update payload.")
+            seen_names.add(lowered)
+
+    async def _sync_column_type(
+        self,
+        conn: AsyncConnection,
+        schema: str,
+        table_name: str,
+        col_name: str,
+        data_type: TenantDataType,
+    ) -> None:
+        from app.db.tenant_db_session import tenant_data_engine
+        table_name_safe = f"{quoted_name(schema, True)}.{quoted_name(table_name, True)}"
+        col_name_safe = quoted_name(col_name, True)
+        col_type_str = self._map_type(data_type).compile(dialect=tenant_data_engine.dialect)
+        stmt = text(
+            f"ALTER TABLE {table_name_safe} "
+            f"ALTER COLUMN {col_name_safe} TYPE {col_type_str} "
+            f"USING {col_name_safe}::{col_type_str}"
+        )
+        await conn.execute(stmt)
+
+    async def _sync_column_nullable(
+        self,
+        conn: AsyncConnection,
+        schema: str,
+        table_name: str,
+        col_name: str,
+        is_nullable: bool,
+    ) -> None:
+        table_name_safe = f"{quoted_name(schema, True)}.{quoted_name(table_name, True)}"
+        col_name_safe = quoted_name(col_name, True)
+        if is_nullable:
+            stmt = text(f"ALTER TABLE {table_name_safe} ALTER COLUMN {col_name_safe} DROP NOT NULL")
+        else:
+            stmt = text(f"ALTER TABLE {table_name_safe} ALTER COLUMN {col_name_safe} SET NOT NULL")
+        await conn.execute(stmt)
+
+    def _literal_sql(self, value: Any, data_type: TenantDataType) -> str:
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float, Decimal)):
+            return str(value)
+        if data_type == TenantDataType.JSON:
+            json_text = json.dumps(value, ensure_ascii=False).replace("'", "''")
+            return f"'{json_text}'::jsonb"
+        text_value = str(value).replace("'", "''")
+        return f"'{text_value}'"
+
+    async def _sync_column_default(
+        self,
+        conn: AsyncConnection,
+        schema: str,
+        table_name: str,
+        col_name: str,
+        data_type: TenantDataType,
+        default_value: Any,
+    ) -> None:
+        table_name_safe = f"{quoted_name(schema, True)}.{quoted_name(table_name, True)}"
+        col_name_safe = quoted_name(col_name, True)
+        if default_value is None:
+            stmt = text(f"ALTER TABLE {table_name_safe} ALTER COLUMN {col_name_safe} DROP DEFAULT")
+        else:
+            literal = self._literal_sql(default_value, data_type)
+            stmt = text(f"ALTER TABLE {table_name_safe} ALTER COLUMN {col_name_safe} SET DEFAULT {literal}")
+        await conn.execute(stmt)
+
+    async def _sync_column_unique(
+        self,
+        conn: AsyncConnection,
+        schema: str,
+        table_name: str,
+        col_name: str,
+        is_unique: bool,
+    ) -> None:
+        table_name_safe = f"{quoted_name(schema, True)}.{quoted_name(table_name, True)}"
+        col_name_safe = quoted_name(col_name, True)
+        def inspect_unique(sync_conn):
+            inspector = inspect(sync_conn)
+            return inspector.get_unique_constraints(table_name, schema=schema)
+
+        constraints = await conn.run_sync(inspect_unique)
+        existing_name = next(
+            (
+                constraint.get("name")
+                for constraint in constraints
+                if constraint.get("column_names") == [col_name]
+            ),
+            None,
+        )
+
+        if is_unique:
+            if existing_name:
+                return
+            constraint_name = quoted_name(f"{table_name}_{col_name}_key", True)
+            stmt = text(
+                f"ALTER TABLE {table_name_safe} "
+                f"ADD CONSTRAINT {constraint_name} UNIQUE ({col_name_safe})"
+            )
+            await conn.execute(stmt)
+            return
+
+        if existing_name:
+            stmt = text(f"ALTER TABLE {table_name_safe} DROP CONSTRAINT IF EXISTS {quoted_name(existing_name, True)}")
+            await conn.execute(stmt)
+
     def _validate_identifier(self, name: str):
-        """[REFACTOR 1] 检查标识符是否为保留关键字。"""
+        """检查标识符格式、长度和关键字冲突。"""
+        if not self.IDENTIFIER_PATTERN.match(name):
+            raise ServiceException(f"Identifier '{name}' is invalid. It must match ^[a-zA-Z_][a-zA-Z0-9_]*$.")
+        if len(name) > 63:
+            raise ServiceException(f"Identifier '{name}' exceeds PostgreSQL max length (63).")
         if name.lower() in self.PG_RESERVED_WORDS:
             raise ServiceException(f"Identifier '{name}' is a reserved keyword and cannot be used.")
 
@@ -622,6 +794,8 @@ class TenantDbService(ResourceImplementationService):
         self._validate_identifier(table_data.name)
         for col in table_data.columns:
             self._validate_identifier(col.name)
+            if col.name.lower() in self.SYSTEM_RESERVED_NAMES:
+                raise ServiceException(f"Column name '{col.name}' is reserved by the system.")
 
         # [REFACTOR 4] 使用 .model_dump() 简化ORM对象创建
         table_meta_dict = table_data.model_dump(exclude={"columns"})

@@ -276,7 +276,8 @@ class AgentService(ResourceImplementationService):
             agent_config=agent_config,
             dependencies=dependencies,
             runtime_workspace=workspace,
-            session_manager=session_manager
+            session_manager=session_manager,
+            prompt_variables=prompt_variables
         )
 
         trace_manager = TraceManager(
