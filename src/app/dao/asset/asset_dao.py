@@ -1,12 +1,11 @@
-# src/app/dao/asset/asset_dao.py
+from typing import List, Optional, Sequence, Tuple
 
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func, and_, or_
-from typing import List, Optional, Union
 
 from app.dao.base_dao import BaseDao
-from app.models import User, Team
-from app.models.asset import Asset, AssetStatus, AssetType
+from app.models.asset import Asset, AssetType
+
 
 class AssetDao(BaseDao[Asset]):
     def __init__(self, db_session: AsyncSession):
@@ -16,11 +15,9 @@ class AssetDao(BaseDao[Asset]):
         return await self.get_one(where={"uuid": uuid}, withs=withs)
 
     async def get_active_by_uuid(self, uuid: str, withs: Optional[list] = None) -> Optional[Asset]:
-        """覆盖查询，确保只查未删除的"""
         return await self.get_one(where={"uuid": uuid, "is_deleted": False}, withs=withs)
 
     async def soft_delete(self, uuid: str) -> bool:
-        """执行软删除"""
         stmt = (
             update(Asset)
             .where(Asset.uuid == uuid)
@@ -29,35 +26,44 @@ class AssetDao(BaseDao[Asset]):
         result = await self.db_session.execute(stmt)
         return result.rowcount > 0
 
-    async def list_by_folder(
-        self, 
-        workspace_id: int, 
-        folder_id: Optional[int], 
+    async def list_by_workspace(
+        self,
+        workspace_id: int,
+        *,
+        folder_ids: Optional[Sequence[int]] = None,
         asset_type: Optional[AssetType] = None,
-        page: int = 1, 
-        limit: int = 20
-    ) -> List[Asset]:
-        """
-        List assets in a specific folder (or root) for a specific owner.
-        """
-        filters = [Asset.workspace_id == workspace_id, Asset.is_deleted == False] # 默认加这个过滤
-            
-        # Folder filter
-        if folder_id is not None:
-            filters.append(Asset.folder_id == folder_id)
-        else:
-            filters.append(Asset.folder_id.is_(None)) # Root folder
-            
-        # Type filter
+        keyword: Optional[str] = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> Tuple[List[Asset], int]:
+        filters = [Asset.workspace_id == workspace_id, Asset.is_deleted == False]
+
+        if folder_ids is not None:
+            if len(folder_ids) == 0:
+                return [], 0
+            filters.append(Asset.folder_id.in_(folder_ids))
+
         if asset_type:
             filters.append(Asset.type == asset_type)
-            
-        # Exclude FAILED assets by default in listings? Maybe user wants to see them to retry.
-        # Let's show all but order by active.
-        
-        return await self.get_list(
+
+        if keyword:
+            normalized = f"%{keyword.strip()}%"
+            filters.append(
+                or_(
+                    Asset.name.ilike(normalized),
+                    Asset.mime_type.ilike(normalized),
+                    Asset.real_name.ilike(normalized),
+                )
+            )
+
+        count_stmt = select(func.count(Asset.id)).where(*filters)
+        total = int((await self.db_session.execute(count_stmt)).scalar_one() or 0)
+
+        items = await self.get_list(
             where=filters,
+            withs=["folder", "intelligence"],
             order=[Asset.created_at.desc()],
             page=page,
-            limit=limit
+            limit=limit,
         )
+        return items, total

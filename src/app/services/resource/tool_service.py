@@ -95,8 +95,9 @@ class ToolService(ResourceImplementationService):
             "version_tag": "__workspace__",
             "status": VersionStatus.WORKSPACE,
             "creator_id": actor.id,
-            "resource_type": "tool",
+            "resource_type": self.name,
             "name": resource.name,
+            "description": resource.description,
             "linked_feature_id": feature.id
         }
         tool_defaults = {

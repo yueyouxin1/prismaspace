@@ -84,6 +84,19 @@
 
 **关系总结：** 一个`Resource`拥有一对多的`ResourceInstance`。用户编辑的永远是`status='WORKSPACE'`的那个`Instance`，发布的是将某个`Instance`的状态变为`PUBLISHED`。
 
+##### **1.4.1 资源与实例元数据一致性约束（新增）**
+
+为避免 `name/description` 等元数据漂移，项目约定如下：
+
+1. `Resource` 是“当前元数据”的单一事实来源（Single Source of Truth）。
+2. `WORKSPACE` 实例是“当前工作副本”，其 `name/description` 必须与 `Resource` 强一致。
+3. `PUBLISHED` 实例是“历史快照”，其 `name/description` 必须冻结，不随 `Resource` 后续修改而变化。
+4. 创建资源时：`WORKSPACE` 实例必须从 `Resource` 复制 `name/description` 初始化。
+5. 更新 `Resource` 元数据时：必须同步更新其 `WORKSPACE` 实例元数据。
+6. 更新实例时：若目标是当前 `WORKSPACE` 实例且实例元数据发生变化，必须反向同步到 `Resource`。
+7. 发布前：应先确保 `WORKSPACE` 实例元数据与 `Resource` 对齐，再生成 `PUBLISHED` 快照。
+8. `ResourceInstance.resource_type` 不允许硬编码魔法字符串，应与实现服务注册名（`register_service` 的 `name`）保持一致。
+
 #### **1.5 服务模块 (Service Module)：平台内置的能力**
 
 *   **核心定义：** 一个由**平台提供和管理**的、原子化的**“能力”**。它们是用户构建`Resource`时可以使用的“基础积木”。

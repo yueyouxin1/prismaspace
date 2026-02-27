@@ -47,9 +47,12 @@ class ToolRead(InstanceRead, ToolSchema):
         instance_dict = {
             # 从 InstanceRead 继承的字段
             "uuid": data.uuid,
+            "name": data.name,
+            "description": data.description,
             "version_tag": data.version_tag,
             "status": data.status.value,
             "created_at": data.created_at,
+            "updated_at": getattr(data, "updated_at", None) or data.created_at,
             "creator": data.creator, # 直接传递User对象，让CreatorInfo.model_validate处理
             
             # 从 ToolSchema 继承的字段

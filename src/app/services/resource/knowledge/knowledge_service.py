@@ -104,8 +104,12 @@ class KnowledgeBaseService(ResourceImplementationService):
         instance_dump = KnowledgeBaseRead(
             uuid=instance.uuid,
             name=instance.name,
+            description=instance.description,
             version_tag=instance.version_tag,
-            status=instance.status, 
+            status=instance.status,
+            created_at=instance.created_at,
+            updated_at=getattr(instance, "updated_at", None) or instance.created_at,
+            creator=instance.creator,
             config=config_obj,
             document_count=doc_count
         ).model_dump()
@@ -128,8 +132,9 @@ class KnowledgeBaseService(ResourceImplementationService):
             version_tag="__workspace__", 
             status=VersionStatus.WORKSPACE, 
             creator_id=actor.id,
-            resource_type="knowledge", 
+            resource_type=self.name, 
             name=resource.name,
+            description=resource.description,
             # [Refactor]: These fields are kept in model but managed dynamically in logic
             # We can store a placeholder or the intended shared name if helpful for debugging,
             # but the source of truth is _resolve_physical_collection_name
@@ -154,6 +159,7 @@ class KnowledgeBaseService(ResourceImplementationService):
                 creator_id=actor.id,
                 published_at=func.now(), 
                 name=workspace_instance.name,
+                description=workspace_instance.description,
                 collection_name=workspace_instance.collection_name, # Copied but ignored
                 engine_alias=workspace_instance.engine_alias,
                 embedding_module_version_id=workspace_instance.embedding_module_version_id,

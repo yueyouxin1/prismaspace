@@ -20,7 +20,7 @@ def detect_asset_type(mime_type: str) -> AssetType:
     return AssetType.OTHER
 
 def generate_storage_key(
-    owner_type: Literal["user", "team"], 
+    owner_type: Literal["user", "team", "workspace"],
     owner_id: int, 
     file_uuid: str, 
     original_filename: str

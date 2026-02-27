@@ -155,6 +155,13 @@ class TestGenericResourceMetadata:
         data = response.json()["data"]
         assert data["uuid"] == created_resource.uuid
         assert data["workspace_instance"]["uuid"] == created_resource.workspace_instance.uuid
+        # 验证 workspace_instance 至少满足通用 InstanceRead 契约
+        assert data["workspace_instance"]["name"] == created_resource.name
+        assert "version_tag" in data["workspace_instance"]
+        assert "status" in data["workspace_instance"]
+        assert "created_at" in data["workspace_instance"]
+        assert "updated_at" in data["workspace_instance"]
+        assert "creator" in data["workspace_instance"]
         
         # 验证特定于类型的字段存在
         if created_resource.resource_type.name == 'tenantdb':

@@ -156,6 +156,11 @@ class ResourceService(BaseResourceService):
         # 3. [核心重构] 将实例化的职责分派给专门的服务
         impl_service = await self._get_impl_service_by_type(resource_type.name)
         new_instance = await impl_service.create_instance(resource=new_resource, actor=actor)
+
+        # 统一收敛：工作区实例必须与 Resource 元数据一致；实例类型必须与注册服务名一致。
+        new_instance.name = new_resource.name
+        new_instance.description = new_resource.description
+        new_instance.resource_type = impl_service.name
         
         # 4. 建立通用关系并持久化
         new_resource.workspace_instance = new_instance
@@ -305,6 +310,10 @@ class ResourceService(BaseResourceService):
         resource = source_instance.resource
         await self.context.perm_evaluator.ensure_can(["resource:publish"], target=resource.workspace)
 
+        # 发布前做一次一致性自愈：workspace 实例元数据以 Resource 为准。
+        source_instance.name = resource.name
+        source_instance.description = resource.description
+
         # 3. 验证版本标签的唯一性
         existing_version = await self.instance_dao.get_one(where={
             "resource_id": resource.id,
@@ -386,8 +395,21 @@ class ResourceService(BaseResourceService):
     async def _update_instance_by_uuid(self, instance_uuid: str, update_data: Dict[str, Any], actor: User) -> ResourceInstance:
         instance = await self._get_full_instance_by_uuid(instance_uuid)
         await self.context.perm_evaluator.ensure_can(["resource:update"], target=instance.resource.workspace)
+        previous_name = instance.name
+        previous_description = instance.description
         service = await self._get_impl_service_by_instance(instance)
         updated_instance = await service.update_instance(instance, update_data)
+
+        # 统一收敛：若编辑的是当前工作区实例，实例与 Resource 必须强一致。
+        if (
+            updated_instance.status == VersionStatus.WORKSPACE
+            and updated_instance.resource.workspace_instance_id == updated_instance.id
+        ):
+            if previous_name != updated_instance.name:
+                updated_instance.resource.name = updated_instance.name
+            if previous_description != updated_instance.description:
+                updated_instance.resource.description = updated_instance.description
+
         await self.db.flush()
         await self.db.refresh(updated_instance)
         

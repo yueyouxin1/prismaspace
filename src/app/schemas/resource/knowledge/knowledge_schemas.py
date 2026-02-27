@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, ConfigDict, HttpUrl, model_validator, con
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from app.schemas.common import ExecutionRequest, ExecutionResponse
+from app.schemas.resource.resource_schemas import InstanceRead
 from app.models.resource.knowledge import DocumentProcessingStatus
 from app.core.config import settings
 
@@ -126,11 +127,7 @@ class KnowledgeBaseUpdate(BaseModel):
     description: Optional[str] = None
     config: Optional[KnowledgeBaseInstanceConfig] = None
 
-class KnowledgeBaseRead(BaseModel):
-    uuid: str
-    name: str
-    version_tag: str
-    status: str
+class KnowledgeBaseRead(InstanceRead):
     config: KnowledgeBaseInstanceConfig
     document_count: int = Field(..., description="The number of documents in this version.")
     model_config = ConfigDict(from_attributes=True, extra="ignore")

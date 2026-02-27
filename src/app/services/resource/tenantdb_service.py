@@ -340,8 +340,9 @@ class TenantDbService(ResourceImplementationService):
             version_tag="__workspace__",
             status=VersionStatus.WORKSPACE,
             creator_id=actor.id,
-            resource_type="tenantdb",
+            resource_type=self.name,
             name=resource.name,
+            description=resource.description,
             schema_name=schema_name,
             resource=resource
         )

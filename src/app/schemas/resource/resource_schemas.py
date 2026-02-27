@@ -1,13 +1,11 @@
 # app/schemas/resource/resource_schemas.py
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 from datetime import datetime
 from app.models import User
-from app.models.resource import Resource, ResourceType, ResourceInstance
+from app.models.resource import Resource, ResourceInstance
 from app.schemas.project.project_schemas import CreatorInfo
-
-AnyInstanceRead = Dict[str, Any]
 
 class ResourceBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="资源名称")
@@ -57,6 +55,70 @@ class ResourceRead(BaseModel):
             "updated_at": data.updated_at,
         }
 
+class InstanceUpdate(BaseModel):
+    visibility: Optional[str] = Field("private")
+    model_config = ConfigDict(from_attributes=True)
+
+class InstancePublish(BaseModel):
+    """Schema for publishing a new version of a resource instance."""
+    version_tag: str = Field(..., description="The new version tag (e.g., '1.0.0'). Must be unique for the resource.")
+    version_notes: Optional[str] = Field(None, description="Notes describing the changes in this version.")
+    
+class InstanceRead(BaseModel):
+    """
+    资源实例通用读模型。
+
+    所有资源实例（tool/agent/workflow/knowledge/tenantdb/uiapp）应至少包含这些稳定元字段。
+    """
+    uuid: str
+    name: str
+    description: Optional[str] = None
+    version_tag: str
+    status: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    creator: Optional[CreatorInfo] = None
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='before')
+    @classmethod
+    def pre_process_orm_obj(cls, data: Any) -> Any:
+        # 这个验证器将在所有继承它的子类中生效
+        if not isinstance(data, ResourceInstance):
+            return data
+        status_value = data.status.value if hasattr(data.status, "value") else str(data.status)
+        payload = {
+            "uuid": data.uuid,
+            "name": data.name,
+            "description": data.description,
+            "version_tag": data.version_tag,
+            "status": status_value,
+            "created_at": data.created_at,
+            # 兼容当前模型层尚未落地 updated_at 的情况
+            "updated_at": getattr(data, "updated_at", None) or data.created_at,
+            "creator": CreatorInfo.model_validate(data.creator) if data.creator else None,
+        }
+
+        # 关键：当子类继承 InstanceRead 时，保留/补齐其声明的扩展字段，避免被基础字段“裁剪”。
+        for field_name in cls.model_fields:
+            if field_name in payload:
+                continue
+            try:
+                value = getattr(data, field_name)
+            except Exception:
+                continue
+            payload[field_name] = value
+        return payload
+
+class AnyInstanceRead(InstanceRead):
+    """
+    ResourceDetailRead 中 workspace_instance 的受控模型。
+
+    - 通过继承 InstanceRead，保证基础元字段一致。
+    - 允许额外字段，兼容不同子域实例的业务扩展字段。
+    """
+    model_config = ConfigDict(from_attributes=True, extra="allow")
+
 class ResourceDetailRead(ResourceRead):
     """
     用于 GET /resources/{uuid} 的聚合响应模型。
@@ -72,37 +134,6 @@ class ResourceDetailRead(ResourceRead):
     workspace_instance_uuid: Optional[str] = Field(None, exclude=True)
 
     model_config = ConfigDict(from_attributes=True)
-
-class InstanceUpdate(BaseModel):
-    visibility: Optional[str] = Field("private")
-    model_config = ConfigDict(from_attributes=True)
-
-class InstancePublish(BaseModel):
-    """Schema for publishing a new version of a resource instance."""
-    version_tag: str = Field(..., description="The new version tag (e.g., '1.0.0'). Must be unique for the resource.")
-    version_notes: Optional[str] = Field(None, description="Notes describing the changes in this version.")
-    
-class InstanceRead(BaseModel):
-    uuid: str
-    version_tag: str
-    status: str
-    created_at: datetime
-    creator: CreatorInfo
-    model_config = ConfigDict(from_attributes=True)
-
-    @model_validator(mode='before')
-    @classmethod
-    def pre_process_orm_obj(cls, data: Any) -> Any:
-        # 这个验证器将在所有继承它的子类中生效
-        if not isinstance(data, ResourceInstance):
-            return data
-        return {
-            "uuid": data.uuid,
-            "version_tag": data.version_tag,
-            "status": data.status.value,
-            "created_at": data.created_at,
-            "creator": CreatorInfo.model_validate(data.creator) if data.creator else None,
-        }
 
 class ResourceDependencyRead(BaseModel):
     resource_uuid: str

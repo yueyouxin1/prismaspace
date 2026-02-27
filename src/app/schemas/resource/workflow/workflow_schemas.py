@@ -33,9 +33,12 @@ class WorkflowRead(InstanceRead, WorkflowSchema):
             status_value = data.status.value if hasattr(data.status, "value") else str(data.status)
             return {
                 "uuid": data.uuid,
+                "name": data.name,
+                "description": data.description,
                 "version_tag": data.version_tag,
                 "status": status_value,
                 "created_at": data.created_at,
+                "updated_at": getattr(data, "updated_at", None) or data.created_at,
                 "creator": CreatorInfo.model_validate(data.creator) if data.creator else None,
                 "graph": data.graph or {},
                 "inputs_schema": data.inputs_schema or [],

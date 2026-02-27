@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 from typing import Optional, List, Any, Dict, Union, Literal
 from app.models.resource.tenantdb import TenantDataType
 from app.schemas.common import ExecutionRequest, ExecutionResponse
+from app.schemas.resource.resource_schemas import InstanceRead
 
 # --- Column Schemas ---
 
@@ -125,11 +126,7 @@ class TenantTableRead(TenantTableBase):
 class TenantDBUpdate(BaseModel):
     pass
 
-class TenantDBRead(BaseModel):
-    uuid: str
-    name: str
-    version_tag: str
-    status: str
+class TenantDBRead(InstanceRead):
     schema_name: str
     tables: List[TenantTableRead]
 

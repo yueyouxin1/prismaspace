@@ -1,43 +1,49 @@
-# src/app/schemas/asset/asset_schemas.py
-
-from pydantic import BaseModel, Field, ConfigDict, HttpUrl
-from typing import Optional, Dict, Any, List
 from datetime import datetime
-from app.models.asset import AssetType, AssetStatus, IntelligenceStatus
+from typing import Any, Dict, List, Optional
 
-# --- Create (Reservation Step) ---
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.models.asset import AssetStatus, AssetType, IntelligenceStatus
+
+
 class AssetCreate(BaseModel):
-    """请求上传凭证"""
-    folder_id: Optional[int] = Field(None, description="目标文件夹ID")
-    filename: str = Field(..., description="原始文件名")
-    size_bytes: int = Field(..., gt=0, description="文件大小")
-    mime_type: str = Field(..., description="MIME类型")
+    """Create an upload ticket for client-side direct upload."""
 
-# --- Upload Response (Ticket) ---
+    folder_uuid: Optional[str] = Field(None, description="Target folder UUID.")
+    # Compatibility input for older clients.
+    folder_id: Optional[int] = Field(None, description="Target folder ID (deprecated).")
+    filename: str = Field(..., min_length=1, max_length=255, description="Original filename.")
+    size_bytes: int = Field(..., gt=0, description="File size in bytes.")
+    mime_type: str = Field(..., min_length=1, max_length=100, description="MIME type.")
+
+
 class AssetUploadTicket(BaseModel):
-    """
-    Returned to frontend to perform the direct upload.
-    """
-    asset_uuid: str = Field(..., description="The UUID of the newly created PENDING asset")
-    upload_url: str = Field(..., description="The host URL to POST the file to")
-    form_data: Dict[str, Any] = Field(..., description="Key-value pairs to include in the multipart form data")
-    provider: str = Field(..., description="Storage provider identifier (e.g., 'aliyun_oss')")
-    upload_key: str = Field(..., description="物理上传路径")
+    """Direct upload ticket returned to frontend."""
 
-# --- Confirm (Commit Step) ---
+    asset_uuid: str = Field(..., description="Generated asset UUID for confirm step.")
+    upload_url: str = Field(..., description="Storage host URL.")
+    form_data: Dict[str, Any] = Field(..., description="Multipart form fields.")
+    provider: str = Field(..., description="Storage provider id.")
+    upload_key: str = Field(..., description="Physical storage key.")
+    folder_uuid: Optional[str] = Field(None, description="Resolved target folder UUID.")
+
+
 class AssetConfirm(BaseModel):
-    """确认上传的参数"""
-    workspace_uuid: str = Field(..., description="所属工作空间UUID")
-    asset_uuid: str = Field(..., description="Ticket阶段生成的资产UUID")
-    upload_key: str = Field(..., description="实际上传的物理路径Key")
-    
-    name: Optional[str] = None
-    force_ai_processing: Optional[bool] = None 
+    """Confirm upload completion and create logical asset."""
 
-# --- Read ---
+    workspace_uuid: str = Field(..., description="Workspace UUID.")
+    asset_uuid: str = Field(..., description="Asset UUID from ticket.")
+    upload_key: str = Field(..., description="Uploaded physical key.")
+    folder_uuid: Optional[str] = Field(None, description="Target folder UUID.")
+    # Compatibility input for older clients.
+    folder_id: Optional[int] = Field(None, description="Target folder ID (deprecated).")
+    name: Optional[str] = Field(None, max_length=255, description="Display name.")
+    force_ai_processing: Optional[bool] = Field(None, description="Override workspace AI processing strategy.")
+
+
 class AssetRead(BaseModel):
     uuid: str
-    name: str = Field(..., max_length=255, description="File display name")
+    name: str = Field(..., max_length=255, description="Display name.")
     url: str
     size: int
     type: AssetType
@@ -45,14 +51,49 @@ class AssetRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     mime_type: Optional[str]
-    folder_id: Optional[int] = Field(None, description="Parent folder ID")
-    # 智能信息展开
+    folder_uuid: Optional[str] = Field(None, description="Parent folder UUID.")
+    # Compatibility field for old frontend clients.
+    folder_id: Optional[int] = Field(None, description="Parent folder ID (deprecated).")
     ai_status: Optional[IntelligenceStatus] = Field(None)
     ai_meta: Optional[Dict[str, Any]] = Field(None)
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_orm_obj(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return data
+
+        folder = getattr(data, "folder", None)
+        intelligence = getattr(data, "intelligence", None)
+
+        return {
+            "uuid": data.uuid,
+            "name": data.name,
+            "url": data.url,
+            "size": data.size,
+            "type": data.type,
+            "status": data.status,
+            "created_at": data.created_at,
+            "updated_at": data.updated_at,
+            "mime_type": data.mime_type,
+            "folder_uuid": getattr(folder, "uuid", None),
+            "folder_id": data.folder_id,
+            "ai_status": getattr(intelligence, "status", None),
+            "ai_meta": getattr(intelligence, "meta", None),
+        }
+
+
+class PaginatedAssetsResponse(BaseModel):
+    items: List[AssetRead]
+    total: int
+    page: int
+    limit: int
+
+
 class AssetUpdate(BaseModel):
-    name: Optional[str] = None
-    folder_id: Optional[int] = None
-    # Meta updates are typically handled by internal workers, not user API directly
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    folder_uuid: Optional[str] = Field(None, description="Move asset to target folder UUID.")
+    # Compatibility input for older clients.
+    folder_id: Optional[int] = Field(None, description="Move asset by folder ID (deprecated).")
