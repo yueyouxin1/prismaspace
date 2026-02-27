@@ -775,9 +775,16 @@ class KnowledgeBaseService(ResourceImplementationService):
                 
                 # Sort DESC
                 all_physical_results.sort(key=lambda x: x.score, reverse=True)
-                
+
+                # Apply score threshold before global cutoff.
+                min_match_score = inputs.config.min_match_score
+                filtered_results = [
+                    result for result in all_physical_results
+                    if result.score is not None and result.score >= min_match_score
+                ]
+
                 # Global Cutoff
-                winners = all_physical_results[:inputs.config.max_recall_num]
+                winners = filtered_results[:inputs.config.max_recall_num]
 
                 # 5. Optimized Hydration
                 per_instance_results = {uid: [] for uid in instance_uuids}
