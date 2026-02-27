@@ -23,6 +23,7 @@ async def startup(ctx):
     """Worker 进程启动时，创建依赖工厂。"""
     ctx['db_session_factory'] = SessionLocal
     ctx['redis_service'] = RedisService()
+    await ctx['redis_service'].initialize()
     engine_configs = [VectorEngineConfig(**config_dict) for config_dict in settings.VECTOR_ENGINE_CONFIGS]
     vector_manager = VectorEngineManager(configs=engine_configs)
     await vector_manager.startup()
