@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from app.schemas.common import ExecutionRequest, ExecutionResponse
 from app.schemas.resource.resource_schemas import InstanceRead
-from app.models.resource.knowledge import DocumentProcessingStatus
+from app.models.resource.knowledge import ChunkProcessingStatus, DocumentProcessingStatus
 from app.core.config import settings
 
 class DocumentRead(BaseModel):
@@ -35,6 +35,22 @@ class DocumentTaskProgress(BaseModel):
     progress: int = 0  # e.g., chunks processed
     total: int = 0     # e.g., total chunks
     error: Optional[str] = None
+
+class DocumentChunkRead(BaseModel):
+    uuid: str
+    content: str
+    token_count: int
+    status: ChunkProcessingStatus
+    error_message: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+    payload: Optional[Dict[str, Any]] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class PaginatedDocumentChunksResponse(BaseModel):
+    items: List[DocumentChunkRead]
+    total: int
+    page: int
+    limit: int
 
 # 用于向版本中添加或更新文档的Schema
 class DocumentCreate(BaseModel):

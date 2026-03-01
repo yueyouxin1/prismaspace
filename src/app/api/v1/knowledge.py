@@ -10,7 +10,14 @@ from app.api.dependencies.context import AuthContextDep
 from app.schemas.common import JsonResponse, MsgResponse
 from app.models import DocumentProcessingStatus
 from app.services.resource.knowledge.knowledge_service import KnowledgeBaseService
-from app.schemas.resource.knowledge.knowledge_schemas import DocumentRead, DocumentRead, DocumentCreate, DocumentUpdate, BatchChunkUpdate, PaginatedDocumentsResponse
+from app.schemas.resource.knowledge.knowledge_schemas import (
+    BatchChunkUpdate,
+    DocumentCreate,
+    DocumentRead,
+    DocumentUpdate,
+    PaginatedDocumentChunksResponse,
+    PaginatedDocumentsResponse,
+)
 from app.services.exceptions import PermissionDeniedError, NotFoundError, ServiceException
 
 router = APIRouter()
@@ -101,10 +108,28 @@ async def list_documents_in_knowledge_base(
     instance_uuid: str,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
+    status: DocumentProcessingStatus | None = Query(None),
+    keyword: str | None = Query(None),
     context: AppContext = AuthContextDep
 ):
     service = KnowledgeBaseService(context)
-    paginated_result = await service.get_documents_in_version(instance_uuid, page, limit)
+    paginated_result = await service.get_documents_in_version(instance_uuid, page, limit, status, keyword)
+    return JsonResponse(data=paginated_result)
+
+@router.get(
+    "/{instance_uuid}/documents/{document_uuid}/chunks",
+    response_model=JsonResponse[PaginatedDocumentChunksResponse],
+    summary="List chunks for a document in a specific KnowledgeBase version",
+)
+async def list_document_chunks_in_knowledge_base(
+    instance_uuid: str,
+    document_uuid: str,
+    page: int = Query(1, ge=1),
+    limit: int = Query(200, ge=1, le=1000),
+    context: AppContext = AuthContextDep,
+):
+    service = KnowledgeBaseService(context)
+    paginated_result = await service.get_document_chunks_in_version(instance_uuid, document_uuid, page, limit)
     return JsonResponse(data=paginated_result)
 
 @router.delete(

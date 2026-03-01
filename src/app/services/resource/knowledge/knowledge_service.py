@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, Optional, List, Set, Tuple
 from datetime import timedelta
-from sqlalchemy import select, func, delete, insert, update, text, Integer
+from sqlalchemy import select, func, delete, insert, update, text, Integer, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,8 +20,8 @@ from app.models.resource.knowledge import KnowledgeBase, KnowledgeDocument, Know
 from app.models.module import ServiceModuleVersion
 from app.schemas.resource.knowledge.knowledge_schemas import (
     KnowledgeBaseRead, KnowledgeBaseUpdate, KnowledgeBaseExecutionRequest, KnowledgeBaseExecutionResponse, 
-    SearchResultChunk, GroupedSearchResult, DocumentRead, BatchChunkUpdate, KnowledgeBaseInstanceConfig, PaginatedDocumentsResponse, 
-    DocumentTaskProgress
+    SearchResultChunk, GroupedSearchResult, DocumentChunkRead, DocumentRead, BatchChunkUpdate, KnowledgeBaseInstanceConfig,
+    PaginatedDocumentChunksResponse, PaginatedDocumentsResponse, DocumentTaskProgress
 )
 from app.services.resource.base.base_impl_service import register_service, ResourceImplementationService, ValidationResult, DependencyInfo
 from app.services.module.service_module_service import ServiceModuleService
@@ -417,18 +417,75 @@ class KnowledgeBaseService(ResourceImplementationService):
         await self.db.refresh(new_doc, attribute_names=['chunks'])
         return new_doc
 
-    async def get_documents_in_version(self, instance_uuid: str, page: int, limit: int) -> PaginatedDocumentsResponse:
+    async def get_documents_in_version(
+        self,
+        instance_uuid: str,
+        page: int,
+        limit: int,
+        status: Optional[DocumentProcessingStatus] = None,
+        keyword: Optional[str] = None,
+    ) -> PaginatedDocumentsResponse:
         instance = await self.get_by_uuid(instance_uuid)
+        if not instance:
+            raise NotFoundError("KnowledgeBase instance not found.")
         await self.context.perm_evaluator.ensure_can(["resource:read"], target=instance.resource.workspace)
-        
+
+        conditions = [KnowledgeBaseVersionDocuments.version_id == instance.version_id]
+        if status:
+            conditions.append(KnowledgeDocument.status == status)
+        if keyword:
+            normalized = keyword.strip()
+            if normalized:
+                like_pattern = f"%{normalized}%"
+                conditions.append(or_(
+                    KnowledgeDocument.file_name.ilike(like_pattern),
+                    KnowledgeDocument.source_uri.ilike(like_pattern),
+                ))
+
         base_query = select(KnowledgeDocument).join(
             KnowledgeBaseVersionDocuments, KnowledgeDocument.id == KnowledgeBaseVersionDocuments.document_id
-        ).where(KnowledgeBaseVersionDocuments.version_id == instance.version_id)
-        
+        ).where(*conditions)
+
         total = await self.db.scalar(select(func.count()).select_from(base_query.subquery()))
         items = (await self.db.execute(base_query.order_by(KnowledgeDocument.created_at.desc()).limit(limit).offset((page - 1) * limit))).scalars().all()
 
         return PaginatedDocumentsResponse(items=[DocumentRead.model_validate(item) for item in items], total=total, page=page, limit=limit)
+
+    async def get_document_chunks_in_version(
+        self,
+        instance_uuid: str,
+        document_uuid: str,
+        page: int,
+        limit: int,
+    ) -> PaginatedDocumentChunksResponse:
+        instance = await self.get_by_uuid(instance_uuid)
+        if not instance:
+            raise NotFoundError("KnowledgeBase instance not found.")
+        await self.context.perm_evaluator.ensure_can(["resource:read"], target=instance.resource.workspace)
+
+        document = await self.document_dao.get_by_uuid(document_uuid)
+        if not document:
+            raise NotFoundError("Document not found.")
+        if not await self._is_document_in_version(instance.version_id, document.id):
+            raise NotFoundError("Document not found in this version.")
+
+        base_query = select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
+        total = await self.db.scalar(select(func.count()).select_from(base_query.subquery()))
+        items = (
+            await self.db.execute(
+                base_query
+                .order_by(KnowledgeChunk.id.asc())
+                .limit(limit)
+                .offset((page - 1) * limit)
+            )
+        ).scalars().all()
+
+        return PaginatedDocumentChunksResponse(
+            items=[DocumentChunkRead.model_validate(item) for item in items],
+            total=total,
+            page=page,
+            limit=limit,
+        )
 
     # --- Task Status (Redis) ---
     def _get_status_key(self, document_uuid: str) -> str: return f"{self._TASK_STATUS_KEY_PREFIX}{document_uuid}"
