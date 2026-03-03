@@ -70,6 +70,7 @@ class LLMResult(BaseModel):
     """标准化的最终返回结果"""
     message: LLMMessage
     usage: LLMUsage
+    reasoning_content: Optional[str] = None
 
 # --- 引擎层异常 ---
 
@@ -113,6 +114,10 @@ class LLMEngineCallbacks(ABC):
     async def on_chunk_generated(self, chunk: str) -> None:
         """每当生成一个新的文本块时调用（流式模式）。"""
         ...
+
+    async def on_reasoning_chunk(self, chunk: str) -> None:
+        """可选回调：当模型返回思考内容时调用。"""
+        return None
     
     @abstractmethod
     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]) -> None:

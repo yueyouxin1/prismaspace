@@ -119,9 +119,17 @@ class MyAgentCallbacks(AgentEngineCallbacks):
         """Stream the final answer to the console."""
         print(chunk, end="", flush=True)
 
+    async def on_reasoning_chunk_generated(self, chunk: str) -> None:
+        print(f"\n[Reasoning] {chunk}", end="", flush=True)
+
     async def on_agent_finish(self, result: AgentResult) -> None:
         print("\n\n--- Agent Run Finished ---")
         print(f"Total Steps: {len(result.steps)}")
+        print("--------------------------")
+
+    async def on_agent_interrupt(self, result: AgentResult) -> None:
+        print("\n\n--- Agent Interrupted ---")
+        print(f"Pending Tool Calls: {len(result.pending_tool_calls)}")
         print("--------------------------")
 
     async def on_agent_cancel(self, result: AgentResult) -> None:

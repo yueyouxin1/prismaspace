@@ -57,7 +57,7 @@ class LLMEngineService:
             if run_config.max_context_window:
                 managed_messages = self.context_manager.manage(
                     messages=messages,
-                    provider=config.client_name,
+                    provider=provider_config.client_name,
                     model=run_config.model,
                     max_context_tokens=run_config.max_context_window,
                     max_tokens=run_config.max_tokens

@@ -36,6 +36,7 @@ class OpenAIClient(LLMClientBase):
     ) -> LLMResult:
         """私有方法，专门处理流式响应。"""
         full_content = ""
+        full_reasoning = ""
         tool_calls_buffer = []
         final_message = LLMMessage(role="assistant")
         final_usage = LLMUsage()
@@ -61,6 +62,17 @@ class OpenAIClient(LLMClientBase):
                     if content_chunk:
                         full_content += content_chunk
                         if callbacks: await callbacks.on_chunk_generated(content_chunk)
+
+                    # 2.1 处理思考块（不同兼容模型字段名不一致，做宽松兼容）
+                    reasoning_chunk = (
+                        getattr(choice.delta, "reasoning_content", None)
+                        or getattr(choice.delta, "reasoning", None)
+                        or getattr(choice.delta, "thinking", None)
+                    )
+                    if reasoning_chunk:
+                        full_reasoning += reasoning_chunk
+                        if callbacks:
+                            await callbacks.on_reasoning_chunk(reasoning_chunk)
                 
                     # 3. 检查结束原因
                     finish_reason = choice.finish_reason
@@ -77,7 +89,11 @@ class OpenAIClient(LLMClientBase):
                     if callbacks: await callbacks.on_usage(final_usage)
 
             # 返回最终的 LLMResult
-            return LLMResult(message=final_message, usage=final_usage)
+            return LLMResult(
+                message=final_message,
+                usage=final_usage,
+                reasoning_content=full_reasoning or None,
+            )
 
         except Exception as e:
             # === 统一兜底逻辑 ===
@@ -113,6 +129,7 @@ class OpenAIClient(LLMClientBase):
         """私有方法，专门处理非流式响应。"""
         final_message = LLMMessage(role="assistant")
         final_usage = LLMUsage()
+        full_reasoning = ""
         try:
             if response.choices:
                 choice = response.choices[0]
@@ -130,11 +147,25 @@ class OpenAIClient(LLMClientBase):
                     if callbacks: await callbacks.on_chunk_generated(message.content)
                     final_message.content = message.content
 
+                reasoning_chunk = (
+                    getattr(message, "reasoning_content", None)
+                    or getattr(message, "reasoning", None)
+                    or getattr(message, "thinking", None)
+                )
+                if reasoning_chunk:
+                    full_reasoning += reasoning_chunk
+                    if callbacks:
+                        await callbacks.on_reasoning_chunk(reasoning_chunk)
+
             if hasattr(response, 'usage') and response.usage:
                 final_usage = LLMUsage(**response.usage.model_dump())
                 if callbacks: await callbacks.on_usage(final_usage)
 
-            return LLMResult(message=final_message, usage=final_usage)
+            return LLMResult(
+                message=final_message,
+                usage=final_usage,
+                reasoning_content=full_reasoning or None,
+            )
         except Exception as e:
             if callbacks:
                 if final_usage.total_tokens == 0:
@@ -183,7 +214,6 @@ class OpenAIClient(LLMClientBase):
             extra_body["thinking_budget"] = run_config.thinking_budget
 
         try:
-            print(f"DEFBUG-api_params: {api_params}")
             response = await self.client.chat.completions.create(**api_params, extra_body=extra_body)
             
             if run_config.stream:

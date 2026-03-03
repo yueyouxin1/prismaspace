@@ -155,6 +155,7 @@ class ResourceAwareToolExecutor(BaseToolExecutor):
         
         self.local_functions: Dict[str, Callable] = {}
         self.resource_instances: Dict[str, str] = {} # tool_name -> instance_uuid
+        self.client_side_tools: Set[str] = set()
         self.llm_tools_def: List[LLMTool] = []
 
     def register_local_function(self, tool_def: LLMTool, fn: Callable):
@@ -167,8 +168,16 @@ class ResourceAwareToolExecutor(BaseToolExecutor):
         self.resource_instances[tool_def.function.name] = instance_uuid
         self.llm_tools_def.append(tool_def)
 
+    def register_client_tool(self, tool_def: LLMTool):
+        """注册由客户端执行并回传结果的工具定义。"""
+        self.client_side_tools.add(tool_def.function.name)
+        self.llm_tools_def.append(tool_def)
+
     def get_llm_tools(self) -> List[LLMTool]:
         return self.llm_tools_def
+
+    def requires_client_execution(self, tool_name: str) -> bool:
+        return tool_name in self.client_side_tools
 
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
         """统一执行入口"""

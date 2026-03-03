@@ -1,7 +1,7 @@
 # src/app/engine/agent/base.py
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
 from ..model.llm.base import LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMUsage
 
@@ -21,6 +21,8 @@ class AgentResult(BaseModel):
     message: LLMMessage
     steps: List[AgentStep] = Field([], description="完整的思维链步骤")
     usage: LLMUsage = Field(default_factory=LLMUsage, description="整个Agent执行过程中的总Token用量")
+    pending_tool_calls: List[LLMToolCall] = Field(default_factory=list, description="等待客户端执行并回传结果的工具调用")
+    outcome: Literal["completed", "interrupted", "cancelled", "error"] = "completed"
 
 # --- Agent 引擎的回调协议 ---
 class AgentEngineCallbacks(ABC):
@@ -45,9 +47,19 @@ class AgentEngineCallbacks(ABC):
     async def on_final_chunk_generated(self, chunk: str) -> None:
         """当最终答案的文本块生成时调用（流式）"""
         ...
+
+    @abstractmethod
+    async def on_reasoning_chunk_generated(self, chunk: str) -> None:
+        """当模型思考内容生成时调用（流式）"""
+        ...
     
     @abstractmethod
     async def on_agent_finish(self, result: AgentResult) -> None:
+        ...
+
+    @abstractmethod
+    async def on_agent_interrupt(self, result: AgentResult) -> None:
+        """当代理等待客户端工具回传结果时调用。"""
         ...
     
     @abstractmethod
@@ -75,3 +87,10 @@ class BaseToolExecutor(ABC):
     @abstractmethod
     def get_llm_tools(self) -> List[LLMTool]:
         ...
+
+    def requires_client_execution(self, tool_name: str) -> bool:
+        """
+        返回 True 表示该工具应由客户端执行并回传结果，而不是由服务端直接执行。
+        默认 False，保持既有行为。
+        """
+        return False

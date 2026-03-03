@@ -82,7 +82,11 @@ class SimpleCallback(AgentEngineCallbacks):
         pass
     async def on_final_chunk_generated(self, chunk: str) -> None:
         pass
+    async def on_reasoning_chunk_generated(self, chunk: str) -> None:
+        pass
     async def on_agent_finish(self, result: AgentResult) -> None:
+        pass
+    async def on_agent_interrupt(self, result: AgentResult) -> None:
         pass
     async def on_agent_cancel(self, result: AgentResult) -> None:
         pass

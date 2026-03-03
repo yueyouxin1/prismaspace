@@ -163,7 +163,7 @@ class AgentEvent(SSEvent):
     ]
 
 class AgentExecutionInputs(BaseModel):
-    input_query: str = Field(..., description="用户的最新输入")
+    input_query: Optional[str] = Field(default="", description="用户的最新输入。支持在恢复流中为空。")
     session_uuid: Optional[str] = Field(None, description="会话UUID。若提供则进行有状态对话。")
     # history 仅用于无状态调用的补充，session_uuid 优先
     history: Optional[List[LLMMessage]] = Field(None, description="无状态模式下的历史消息")

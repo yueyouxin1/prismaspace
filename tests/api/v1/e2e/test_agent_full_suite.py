@@ -158,7 +158,15 @@ class TestAgentFullSuite:
         mock_llm_engine_service.response_sequence.append(("text", expected_content))
         
         # 发起请求
-        payload = {"inputs": {"input_query": "Hi"}}
+        payload = {
+            "threadId": f"thread_{uuid.uuid4().hex[:8]}",
+            "runId": f"run_{uuid.uuid4().hex[:8]}",
+            "state": {},
+            "messages": [{"id": "u1", "role": "user", "content": "Hi"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {},
+        }
         
         # 使用 request 消费整个流
         async with client.stream("POST", f"/api/v1/agent/{agent_instance.uuid}/sse", json=payload, headers=headers) as response:
@@ -180,20 +188,33 @@ class TestAgentFullSuite:
         full_content = ""
         content_chunks = []
         for event in events:
-            event_type = event["type"]
             event_data = event["data"]
+            event_type = event_data.get("type", event["type"])
             event_types.append(event_type)
-            if event_type == "chunk" and "content" in event_data:
-                content_chunks.append(event_data.get("content", ""))
-            elif event_type == "finish" and "message" in event_data:
-                full_content = event_data["message"]["content"]
+            if event_type == "TEXT_MESSAGE_CONTENT":
+                content_chunks.append(event_data.get("delta", ""))
+            elif event_type == "RUN_FINISHED":
+                result = event_data.get("result") or {}
+                message = result.get("message") or {}
+                full_content = message.get("content", "")
 
         assert full_content == "".join(content_chunks)
         
         # 验证生命周期事件
-        assert "start" in event_types
-        assert "chunk" in event_types
-        assert "finish" in event_types
+        assert "RUN_STARTED" in event_types
+        assert "TEXT_MESSAGE_CONTENT" in event_types
+        assert "RUN_FINISHED" in event_types
+
+        # [稳定性] 等待后台任务收尾，避免 teardown 时出现 DB 连接并发冲突
+        current_task = asyncio.current_task()
+        for task in asyncio.all_tasks():
+            if task is current_task or task.done():
+                continue
+            if "run_agent_background_task" in str(task) or "AgentService" in str(task):
+                try:
+                    await asyncio.wait_for(task, timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
 
     # ==========================================================================
     # Scene 2: WebSocket 双向交互 (Chat)

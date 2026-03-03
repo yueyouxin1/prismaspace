@@ -64,7 +64,8 @@ class AgentSessionManager:
         content: str = None, 
         tool_calls: List[Dict] = None, 
         tool_call_id: str = None,
-        token_count: int = 0
+        token_count: int = 0,
+        meta: Optional[Dict[str, Any]] = None,
     ):
         if not self.session:
             # 无状态模式不持久化
@@ -78,7 +79,8 @@ class AgentSessionManager:
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
             "token_count": token_count,
-            "trace_id": self.trace_id
+            "trace_id": self.trace_id,
+            "meta": meta,
         })
 
     async def commit(self, deep_memory_config: DeepMemoryConfig):

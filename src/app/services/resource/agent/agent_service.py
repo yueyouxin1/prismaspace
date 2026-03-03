@@ -55,7 +55,7 @@ from app.engine.agent import (
     AgentEngineService, AgentInput, AgentStep, AgentResult, AgentEngineCallbacks, BaseToolExecutor
 )
 from app.engine.model.llm import (
-    LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMUsage, LLMEngineCallbacks
+    LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMToolFunction, LLMUsage, LLMEngineCallbacks
 )
 from app.engine.utils.tokenizer.manager import tokenizer_manager
 
@@ -78,6 +78,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.usage_accumulator = usage_accumulator
         self.final_result: Optional[AgentResult] = None
         self.has_terminal_event = False
+        self.reasoning_chunks: List[str] = []
 
     def _base_event_data(self) -> Dict[str, Any]:
         session_uuid = self.session_manager.session.uuid if self.session_manager and self.session_manager.session else None
@@ -128,6 +129,20 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         # 仅用于前端流式展示
         await self._emit("message.delta", {"delta": chunk})
 
+    async def on_reasoning_chunk_generated(self, chunk: str):
+        if chunk:
+            self.reasoning_chunks.append(chunk)
+        await self._emit("reasoning.delta", {"delta": chunk})
+
+    def _assistant_meta(self) -> Optional[Dict[str, Any]]:
+        if not self.reasoning_chunks:
+            return None
+        return {
+            "reasoning": {
+                "plaintext": "".join(self.reasoning_chunks)
+            }
+        }
+
     async def on_agent_finish(self, result: AgentResult):
         self.final_result = result
         if not self.has_terminal_event:
@@ -138,7 +153,35 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             })
         # Buffer final message
         if self.session_manager and result.message.content:
-            self.session_manager.buffer_message(role=MessageRole.ASSISTANT, content=result.message.content)
+            self.session_manager.buffer_message(
+                role=MessageRole.ASSISTANT,
+                content=result.message.content,
+                meta=self._assistant_meta(),
+            )
+
+    async def on_agent_interrupt(self, result: AgentResult):
+        self.final_result = result
+        if self.has_terminal_event:
+            return
+        self.has_terminal_event = True
+        pending_calls = [tc.model_dump(mode="json") for tc in (result.pending_tool_calls or [])]
+        await self._emit("done", {
+            "status": "interrupt",
+            "interrupt": {
+                "id": f"interrupt-{self.trace_id}",
+                "reason": "tool_result_required",
+                "payload": {
+                    "tool_calls": pending_calls,
+                },
+            },
+            "result": result.model_dump(),
+        })
+        if self.session_manager and result.message.content:
+            self.session_manager.buffer_message(
+                role=MessageRole.ASSISTANT,
+                content=result.message.content,
+                meta=self._assistant_meta(),
+            )
 
     async def on_agent_cancel(self, result: AgentResult) -> None:
         # [新] 现在引擎发送任何错误(不只是asyncio.CancelledError)都会发送on_agent_cancel事件并包含已生成内容和总用量，用量抢救现在由引擎负责兜底
@@ -152,7 +195,11 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             })
         # Buffer final message
         if self.session_manager and result.message.content:
-            self.session_manager.buffer_message(role=MessageRole.ASSISTANT, content=result.message.content)
+            self.session_manager.buffer_message(
+                role=MessageRole.ASSISTANT,
+                content=result.message.content,
+                meta=self._assistant_meta(),
+            )
 
     async def on_agent_error(self, error: Exception):
         if self.has_terminal_event:
@@ -280,8 +327,13 @@ class AgentService(ResourceImplementationService):
 
         # 3. Inputs
         inputs = execute_params.inputs
-        if not inputs.input_query:
+        if not inputs.input_query and not inputs.history:
             raise ServiceException("Agent input query is required.")
+
+        ag_ui_meta = {}
+        if execute_params.meta and isinstance(execute_params.meta, dict):
+            ag_ui_meta = execute_params.meta.get("ag_ui", {}) or {}
+        ag_ui_tools_raw = ag_ui_meta.get("tools", []) if isinstance(ag_ui_meta, dict) else []
             
         generator_manager = AsyncGeneratorManager()
         dependencies = await self.ref_dao.get_dependencies(instance.id)
@@ -305,6 +357,24 @@ class AgentService(ResourceImplementationService):
         history = inputs.history if not session else None
         user_message = LLMMessage(role="user", content=inputs.input_query)
         tool_executor = ResourceAwareToolExecutor(self.context, workspace)
+
+        # AG-UI client-side tools are first-class tools in the run config,
+        # but their execution happens on the client and is resumed via interrupt flow.
+        for tool_item in ag_ui_tools_raw:
+            try:
+                if not isinstance(tool_item, dict):
+                    continue
+                tool_def = LLMTool(
+                    type="function",
+                    function=LLMToolFunction(
+                        name=tool_item["name"],
+                        description=tool_item.get("description", ""),
+                        parameters=tool_item.get("parameters", {"type": "object", "properties": {}}),
+                    ),
+                )
+                tool_executor.register_client_tool(tool_def)
+            except Exception as e:
+                logger.warning(f"Invalid AG-UI tool definition ignored: {e}")
 
         pipeline_manager = AgentPipelineManager(
             system_message=system_message,

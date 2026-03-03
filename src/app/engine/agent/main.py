@@ -53,6 +53,9 @@ class AgentEngineService:
                     async def on_chunk_generated(self, chunk: str):
                         # 流式输出最终答案
                         if callbacks: await callbacks.on_final_chunk_generated(chunk)
+
+                    async def on_reasoning_chunk(self, chunk: str):
+                        if callbacks: await callbacks.on_reasoning_chunk_generated(chunk)
                     
                     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]):
                         # 通知 UI 模型正在请求工具
@@ -68,7 +71,8 @@ class AgentEngineService:
                             agent_result = AgentResult(
                                 message=result.message,
                                 steps=intermediate_steps,
-                                usage=total_usage # 返回累加后的总用量
+                                usage=total_usage, # 返回累加后的总用量
+                                outcome="cancelled",
                             )                            
                             await callbacks.on_agent_cancel(agent_result)
 
@@ -122,7 +126,10 @@ class AgentEngineService:
                                 tool_args = json.loads(arguments_str)
                             except json.JSONDecodeError:
                                 return tc, {"error": "Invalid JSON arguments provided."}
-                            
+
+                            if tool_executor.requires_client_execution(tool_name):
+                                return tc, {"__ag_ui_interrupt__": True, "tool_name": tool_name, "tool_args": tool_args}
+
                             # 执行工具
                             observation = await tool_executor.execute(tool_name, tool_args)
                             return tc, observation
@@ -133,6 +140,7 @@ class AgentEngineService:
                     tool_results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     # 处理结果并更新历史
+                    pending_tool_calls: List[LLMToolCall] = []
                     for i, result in enumerate(tool_results):
                         original_tool_call = tool_calls_objects[i]
                         
@@ -140,6 +148,10 @@ class AgentEngineService:
                             observation = f'{{"error": "Tool execution failed unexpectedly.", "details": "{str(result)}"}}'
                         else:
                             _, observation = result
+
+                        if isinstance(observation, dict) and observation.get("__ag_ui_interrupt__") is True:
+                            pending_tool_calls.append(original_tool_call)
+                            continue
 
                         # 记录步骤
                         step = AgentStep(action=original_tool_call, observation=observation)
@@ -152,6 +164,18 @@ class AgentEngineService:
                             tool_call_id=original_tool_call.id,
                             content=json.dumps(observation, ensure_ascii=False)
                         ))
+
+                    if pending_tool_calls:
+                        interrupt_result = AgentResult(
+                            message=assistant_msg,
+                            steps=intermediate_steps,
+                            usage=total_usage,
+                            pending_tool_calls=pending_tool_calls,
+                            outcome="interrupted",
+                        )
+                        if callbacks:
+                            await callbacks.on_agent_interrupt(interrupt_result)
+                        return interrupt_result
                     
                     # 完成工具调用后，continue 进入下一轮循环，将工具结果发回给 LLM
                     continue 
@@ -162,7 +186,8 @@ class AgentEngineService:
                     result = AgentResult(
                         message=assistant_msg,
                         steps=intermediate_steps,
-                        usage=total_usage # 返回累加后的总用量
+                        usage=total_usage, # 返回累加后的总用量
+                        outcome="completed",
                     )
                     if callbacks: await callbacks.on_agent_finish(result)
                     return result

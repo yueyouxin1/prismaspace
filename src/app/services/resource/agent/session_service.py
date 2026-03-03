@@ -120,7 +120,8 @@ class SessionService(BaseService):
         tool_calls: List[Dict[str, Any]] = None, 
         tool_call_id: str = None,
         trace_id: str = None,
-        token_count: int = 0
+        token_count: int = 0,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> ChatMessage:
         """
         [Atomic] 持久化消息。
@@ -132,7 +133,8 @@ class SessionService(BaseService):
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,
             token_count=token_count,
-            trace_id=trace_id
+            trace_id=trace_id,
+            meta=meta,
         )
         await self.db.add(msg)
 
@@ -164,7 +166,8 @@ class SessionService(BaseService):
                     tool_calls=data.get('tool_calls'),
                     tool_call_id=data.get('tool_call_id'),
                     token_count=data.get('token_count', 0),
-                    trace_id=data.get('trace_id')
+                    trace_id=data.get('trace_id'),
+                    meta=data.get('meta'),
                 )
                 orm_messages.append(msg)
             
