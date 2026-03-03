@@ -230,21 +230,30 @@ class DependencySkillsProcessor(BaseSkillProcessor):
     async def process(self, tool_executor: BaseToolExecutor) -> None:
         for dep in self.dependencies:
             instance = dep.target_instance
-            if not instance: continue
+            if not instance:
+                continue
+
+            instance_uuid = instance.uuid
+            display_name = (
+                dep.alias
+                or (dep.target_resource.name if dep.target_resource else None)
+                or instance_uuid
+            )
+
             try:
-                # 获取特定版本的实现服务
-                target_service = await self.resource_service._get_impl_service_by_instance(instance)
+                # 依赖关系里拿到的是轻量实例，先按 uuid 加载 full typed instance。
+                full_instance, target_service = await self.resource_service._get_full_instance_and_service(instance_uuid)
                 # 转换 Tool 定义
-                tool_def = await target_service.as_llm_tool(instance)
+                tool_def = await target_service.as_llm_tool(full_instance)
                 if tool_def:
                     # 使用引用中的 alias 重命名工具 (如果存在)
                     if dep.alias:
                         tool_def.function.name = dep.alias
                     
                     # 注册到 Executor (ResourceAwareToolExecutor 会处理远程调用逻辑)
-                    tool_executor.register_resource_instance(tool_def, instance.uuid)
+                    tool_executor.register_resource_instance(tool_def, full_instance.uuid)
             except Exception as e:
-                logger.warning(f"Failed to load tool dependency {instance.name}: {e}")
+                logger.warning(f"Failed to load tool dependency {display_name}: {e}")
 
 class DeepMemorySkillsProcessor(BaseSkillProcessor):
     """

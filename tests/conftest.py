@@ -351,6 +351,63 @@ async def client(
     if hasattr(app.state, 'vector_manager'): del app.state.vector_manager
     if hasattr(app.state, 'arq_pool'): del app.state.arq_pool
 
+@pytest.fixture(scope="function")
+async def prod_like_client(
+    db_session: AsyncSession,
+    real_redis_service: RedisService,
+    vector_manager_mock: VectorEngineManager,
+    arq_pool_mock: AsyncMock,
+    monkeypatch
+) -> AsyncGenerator[AsyncClient, None]:
+    """
+    生产一致性基线：每个请求使用独立 AsyncSession + request 事务。
+    该 fixture 主要用于暴露跨请求场景下的隐式懒加载风险。
+    """
+    if not db_session.in_transaction():
+        await db_session.begin()
+    shared_connection = await db_session.connection()
+
+    ProdLikeSessionLocal = async_sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+        bind=shared_connection,
+        class_=AsyncSession,
+        join_transaction_mode="create_savepoint",
+    )
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with ProdLikeSessionLocal() as session:
+            async with session.begin():
+                yield session
+
+    loop_local_tenant_engine = create_async_engine(settings.DATABASE_URL_TENANT_DATA, poolclass=NullPool)
+    monkeypatch.setattr('app.db.tenant_db_session.tenant_data_engine', loop_local_tenant_engine)
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with ProdLikeSessionLocal() as bootstrap_session:
+        app.state.permission_hierarchy = await preload_permission_hierarchy(bootstrap_session)
+    app.state.redis_service = real_redis_service
+    app.state.vector_manager = vector_manager_mock
+    app.state.arq_pool = arq_pool_mock
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+    app.dependency_overrides.clear()
+
+    if hasattr(app.state, 'vector_manager') and app.state.vector_manager:
+        await app.state.vector_manager.shutdown()
+    if hasattr(app.state, 'arq_pool') and app.state.arq_pool:
+        await app.state.arq_pool.close()
+
+    await loop_local_tenant_engine.dispose()
+
+    if hasattr(app.state, 'redis_service'): del app.state.redis_service
+    if hasattr(app.state, 'vector_manager'): del app.state.vector_manager
+    if hasattr(app.state, 'arq_pool'): del app.state.arq_pool
+
 # 提供一个通用的、可用于物理验证的 tenant data connection
 @pytest.fixture(scope="function")
 async def tenant_data_db_conn() -> AsyncGenerator[AsyncConnection, None]:

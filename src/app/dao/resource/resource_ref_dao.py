@@ -12,6 +12,46 @@ class ResourceRefDao(BaseDao[ResourceRef]):
     def __init__(self, db_session: AsyncSession):
         super().__init__(ResourceRef, db_session)
 
+    @staticmethod
+    def _read_model_options():
+        """
+        统一的读取选项，覆盖 ReferenceRead 需要的所有字段，避免隐式懒加载。
+        """
+        return [
+            joinedload(ResourceRef.source_instance).options(
+                lazyload("*"),
+                load_only(ResourceInstance.id, ResourceInstance.uuid)
+            ),
+            joinedload(ResourceRef.target_instance).options(
+                lazyload("*"),
+                load_only(
+                    ResourceInstance.id,
+                    ResourceInstance.uuid,
+                    ResourceInstance.version_tag,
+                    ResourceInstance.resource_type,
+                    ResourceInstance.name,
+                    ResourceInstance.description,
+                )
+            ),
+            joinedload(ResourceRef.target_resource).options(
+                lazyload("*"),
+                load_only(Resource.id, Resource.name, Resource.description, Resource.resource_type_id),
+                joinedload(Resource.resource_type).options(
+                    lazyload("*"),
+                    load_only(ResourceType.id, ResourceType.name)
+                )
+            )
+        ]
+
+    async def get_by_id_for_read(self, ref_id: int) -> ResourceRef | None:
+        stmt = (
+            select(ResourceRef)
+            .where(ResourceRef.id == ref_id)
+            .options(*self._read_model_options())
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalars().first()
+
     async def get_dependencies(self, source_instance_id: int, source_node_uuid: str = None) -> List[ResourceRef]:
         """
         获取指定实例的所有出站依赖（它引用了谁）。
@@ -21,24 +61,7 @@ class ResourceRefDao(BaseDao[ResourceRef]):
         if source_node_uuid is not None:
             stmt = stmt.where(ResourceRef.source_node_uuid == source_node_uuid)
 
-        stmt = stmt.options(
-            joinedload(ResourceRef.source_instance).options(
-                lazyload("*"),
-                load_only(ResourceInstance.id, ResourceInstance.uuid)
-            ),
-            joinedload(ResourceRef.target_instance).options(
-                lazyload("*"),
-                load_only(ResourceInstance.id, ResourceInstance.uuid, ResourceInstance.version_tag)
-            ),
-            joinedload(ResourceRef.target_resource).options(
-                lazyload("*"),
-                load_only(Resource.id, Resource.name, Resource.resource_type_id),
-                joinedload(Resource.resource_type).options(
-                    lazyload("*"),
-                    load_only(ResourceType.id, ResourceType.name)
-                )
-            )
-        )
+        stmt = stmt.options(*self._read_model_options())
         result = await self.db_session.execute(stmt)
         return list(result.scalars().all())
 

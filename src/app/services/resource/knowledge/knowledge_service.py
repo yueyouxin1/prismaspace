@@ -897,7 +897,8 @@ class KnowledgeBaseService(ResourceImplementationService):
         return ValidationResult(is_valid=True, errors=[])
     
     async def get_dependencies(self, instance: KnowledgeBase) -> List[DependencyInfo]:
-        return [DependencyInfo(resource_uuid="sys", instance_uuid=str(instance.embedding_module_version_id), alias="embedding_model")]
+        # 知识库当前不暴露资源依赖（embedding module 属于系统模块，不是 Resource 依赖边）。
+        return []
 
     async def get_searchable_content(self, instance: KnowledgeBase) -> str:
         return f"{instance.name} {instance.description or ''}"

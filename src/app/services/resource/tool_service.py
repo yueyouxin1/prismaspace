@@ -218,8 +218,10 @@ class ToolService(ResourceImplementationService):
         # 2. 如果没有，尝试从 inputs_schema 自动转换
         properties = {}
         required = []
-        if instance.inputs_schema:
-            for param in instance.inputs_schema:
+        validated_inputs_schema = [ParameterSchema.model_validate(p) for p in instance.inputs_schema or []]
+        validated_outputs_schema = [ParameterSchema.model_validate(p) for p in instance.outputs_schema or []]
+        if validated_inputs_schema:
+            for param in validated_inputs_schema:
                 if param.name:
                     properties[param.name] = build_json_schema_node(param)
                     if param.required:

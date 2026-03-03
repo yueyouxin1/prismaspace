@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 import asyncio
+import time
 from typing import Dict, Any, List, Callable, Optional, AsyncGenerator, Union
 from decimal import Decimal
 from contextlib import asynccontextmanager, nullcontext
@@ -76,25 +77,46 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.generator_manager = generator_manager
         self.usage_accumulator = usage_accumulator
         self.final_result: Optional[AgentResult] = None
+        self.has_terminal_event = False
+
+    def _base_event_data(self) -> Dict[str, Any]:
+        session_uuid = self.session_manager.session.uuid if self.session_manager and self.session_manager.session else None
+        return {
+            "trace_id": self.trace_id,
+            "session_uuid": session_uuid,
+            "turn_id": self.trace_id,
+            "ts": int(time.time() * 1000),
+        }
+
+    async def _emit(self, event: str, payload: Dict[str, Any]):
+        merged_payload = {
+            **self._base_event_data(),
+            **payload,
+        }
+        await self.generator_manager.put(AgentEvent(event=event, data=merged_payload))
 
     async def on_agent_start(self):
-        data={
-            "trace_id": self.trace_id, 
-            "session_uuid": self.session_manager.session.uuid if self.session_manager.session else None
-        }
-        await self.generator_manager.put(AgentEvent(event="start", data=data))
+        await self._emit("message.delta", {"delta": "", "phase": "start"})
 
     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]):
         tool_calls_data = [tc.model_dump() for tc in tool_calls]
-        await self.generator_manager.put(AgentEvent(event="tool_input", data={"tool_calls": tool_calls_data}))
+        await self._emit("tool.started", {"tool_calls": tool_calls_data})
         if self.session_manager:
             self.session_manager.buffer_message(role=MessageRole.ASSISTANT, tool_calls=tool_calls_data)
             
     async def on_agent_step(self, step: AgentStep):
-        await self.generator_manager.put(AgentEvent(event="tool_output", data={
+        if step.thought:
+            await self._emit("reasoning.delta", {"delta": step.thought})
+        await self._emit("tool.delta", {
             "tool": step.action.function['name'],
-            "output": step.observation
-        }))
+            "delta": step.observation,
+            "tool_call_id": step.action.id,
+        })
+        await self._emit("tool.finished", {
+            "tool": step.action.function['name'],
+            "output": step.observation,
+            "tool_call_id": step.action.id,
+        })
         if self.session_manager:
             self.session_manager.buffer_message(
                 role=MessageRole.TOOL,
@@ -104,11 +126,16 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
 
     async def on_final_chunk_generated(self, chunk: str):
         # 仅用于前端流式展示
-        await self.generator_manager.put(AgentEvent(event="chunk", data={"content": chunk}))
+        await self._emit("message.delta", {"delta": chunk})
 
     async def on_agent_finish(self, result: AgentResult):
         self.final_result = result
-        await self.generator_manager.put(AgentEvent(event="finish", data=result.model_dump()))
+        if not self.has_terminal_event:
+            self.has_terminal_event = True
+            await self._emit("done", {
+                "status": "completed",
+                "result": result.model_dump(),
+            })
         # Buffer final message
         if self.session_manager and result.message.content:
             self.session_manager.buffer_message(role=MessageRole.ASSISTANT, content=result.message.content)
@@ -117,19 +144,32 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         # [新] 现在引擎发送任何错误(不只是asyncio.CancelledError)都会发送on_agent_cancel事件并包含已生成内容和总用量，用量抢救现在由引擎负责兜底
         self.final_result = result
         # 通知前端
-        await self.generator_manager.put(AgentEvent(event="cancel", data=result.model_dump()))
+        if not self.has_terminal_event:
+            self.has_terminal_event = True
+            await self._emit("done", {
+                "status": "cancelled",
+                "result": result.model_dump(),
+            })
         # Buffer final message
         if self.session_manager and result.message.content:
             self.session_manager.buffer_message(role=MessageRole.ASSISTANT, content=result.message.content)
 
     async def on_agent_error(self, error: Exception):
-        await self.generator_manager.put(AgentEvent(event="error", data={"error": str(error)}))
+        if self.has_terminal_event:
+            return
+        self.has_terminal_event = True
+        await self._emit("error", {
+            "code": "AGENT_EXECUTION_ERROR",
+            "message": str(error),
+            "retriable": False,
+        })
 
     async def on_usage(self, usage: LLMUsage):
         # [Billing Core] 计费的核心驱动力
         # 每次 LLM 调用（Prompt/Completion）都会触发此回调
         if self.usage_accumulator:
             self.usage_accumulator.add(usage)
+        await self._emit("usage", usage.model_dump())
 
 @register_service
 class AgentService(ResourceImplementationService):
@@ -175,13 +215,13 @@ class AgentService(ResourceImplementationService):
             )
             generator = result.generator
             async for event in generator:
-                if event.event == "start":
+                if event.event == "message.delta":
                     session_uuid = event.data.get("session_uuid")
                     trace_id = event.data.get("trace_id")
-                elif event.event == "finish":
-                    agent_result = event.data
-                elif event.event == "cancel":
-                    agent_result = event.data
+                elif event.event == "done":
+                    done_result = event.data.get("result")
+                    if isinstance(done_result, dict):
+                        agent_result = done_result
                 elif event.event == "error":
                     logger.error(f"Agent stream error: {event.data}")
                     # 在非流式模式下，遇到错误应抛出，以便上层捕获
@@ -339,6 +379,7 @@ class AgentService(ResourceImplementationService):
         session_manager: Optional[AgentSessionManager] = None
     ):
 
+        callbacks: Optional[PersistingAgentCallbacks] = None
         try:
             usage_accumulator = UsageAccumulator()
 
@@ -423,7 +464,16 @@ class AgentService(ResourceImplementationService):
             raise 
         except Exception as e:
             logger.error(f"Agent task error: {e}", exc_info=True)
-            await generator_manager.put(AgentEvent(event="error", data={"error": str(e)}))
+            if callbacks and not callbacks.has_terminal_event:
+                callbacks.has_terminal_event = True
+                await generator_manager.put(AgentEvent(event="error", data={
+                    "trace_id": trace_manager.force_trace_id,
+                    "turn_id": trace_manager.force_trace_id,
+                    "ts": int(time.time() * 1000),
+                    "code": "AGENT_RUNTIME_ERROR",
+                    "message": str(e),
+                    "retriable": False,
+                }))
         finally:
             await generator_manager.aclose(force=False)
 

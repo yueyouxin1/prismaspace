@@ -107,6 +107,9 @@ class AgentConfig(BaseModel):
     # --- RAG 配置 ---
     rag_config: AgentRAGConfig = Field(default_factory=AgentRAGConfig)
 
+    # --- UI 配置（前端编排工作台元信息，非执行核心逻辑） ---
+    ui_config: Dict[str, Any] = Field(default_factory=dict)
+
     @model_validator(mode='after')
     def apply_diversity_presets(self):
         """根据多样性模式自动调整模型参数"""
@@ -147,7 +150,17 @@ class AgentRead(InstanceRead, AgentSchema):
 
 class AgentEvent(SSEvent):
     """Agent 运行时产生的原子事件"""
-    event: Literal["start", "think", "chunk", "tool_input", "tool_output", "finish", "cancel", "error"]
+    event: Literal[
+        "message.delta",
+        "reasoning.delta",
+        "tool.started",
+        "tool.delta",
+        "tool.finished",
+        "reference",
+        "usage",
+        "done",
+        "error",
+    ]
 
 class AgentExecutionInputs(BaseModel):
     input_query: str = Field(..., description="用户的最新输入")

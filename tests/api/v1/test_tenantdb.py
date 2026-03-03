@@ -28,6 +28,11 @@ pytestmark = pytest.mark.asyncio
 # ==============================================================================
 
 @pytest.fixture
+async def client(prod_like_client):
+    """TenantDB 资源相关测试使用生产一致的请求级 Session 基线。"""
+    yield prod_like_client
+
+@pytest.fixture
 async def created_tenantdb_resource(
     client: AsyncClient, 
     auth_headers_factory: Callable,

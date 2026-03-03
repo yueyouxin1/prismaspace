@@ -74,6 +74,17 @@ class SessionService(BaseService):
         )
         return [self._to_session_read(session, agent_instance_uuid) for session in sessions]
 
+    async def rename_session(self, session_uuid: str, title: str, actor: User) -> ChatSessionRead:
+        session = await self.get_session(session_uuid, actor)
+        cleaned_title = title.strip()
+        if not cleaned_title:
+            raise ServiceException("Session title cannot be empty.")
+        session.title = cleaned_title
+        await self.db.flush()
+        instance = await self.instance_dao.get_by_id(session.agent_instance_id)
+        instance_uuid = instance.uuid if instance else ""
+        return self._to_session_read(session, instance_uuid)
+
     def _to_session_read(self, session: ChatSession, agent_instance_uuid: str) -> ChatSessionRead:
         return ChatSessionRead.model_validate({
             "uuid": session.uuid,

@@ -6,7 +6,7 @@ from app.core.context import AppContext
 from app.api.dependencies.context import AuthContextDep
 from app.schemas.common import JsonResponse, MsgResponse
 from app.schemas.interaction.chat_schemas import (
-    ChatSessionCreate, ChatSessionRead, ChatMessageRead, ContextClearRequest
+    ChatSessionCreate, ChatSessionRead, ChatMessageRead, ChatSessionUpdate, ContextClearRequest
 )
 from app.services.resource.agent.session_service import SessionService
 from app.services.exceptions import NotFoundError, PermissionDeniedError
@@ -41,6 +41,22 @@ async def delete_session(
     service = SessionService(context)
     await service.delete_session(session_uuid, context.actor)
     return MsgResponse(msg="Session archived.")
+
+@router.patch("/sessions/{session_uuid}", response_model=JsonResponse[ChatSessionRead], summary="Rename session")
+async def rename_session(
+    session_uuid: str,
+    data: ChatSessionUpdate,
+    context: AppContext = AuthContextDep,
+):
+    title = (data.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Session title is required.")
+    service = SessionService(context)
+    try:
+        session = await service.rename_session(session_uuid, title, context.actor)
+    except (NotFoundError, PermissionDeniedError) as error:
+        raise HTTPException(status_code=404 if isinstance(error, NotFoundError) else 403, detail=str(error))
+    return JsonResponse(data=session)
 
 @router.get("/sessions/{session_uuid}/messages", response_model=JsonResponse[List[ChatMessageRead]], summary="Get message history")
 async def get_session_history(

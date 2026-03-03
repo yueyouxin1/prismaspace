@@ -30,6 +30,11 @@ pytestmark = pytest.mark.asyncio
 # 1. KnowledgeBase 文档管理测试套件
 # ==============================================================================
 
+@pytest.fixture
+async def client(prod_like_client):
+    """知识库资源相关测试使用生产一致的请求级 Session 基线。"""
+    yield prod_like_client
+
 @pytest.mark.usefixtures("registered_user_with_pro")
 class TestKnowledgeBaseDocumentManagement:
     """测试 KnowledgeBase 实例中的文档管理（添加、列表、删除、更新）。"""

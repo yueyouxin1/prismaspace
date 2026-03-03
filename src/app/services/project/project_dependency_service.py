@@ -58,7 +58,7 @@ class ProjectDependencyService(BaseResourceService):
             if instance_uuid in instance_cache:
                 return instance_cache[instance_uuid]
             try:
-                instance = await self._get_full_instance_by_uuid(instance_uuid)
+                instance, _ = await self._get_full_instance_and_service(instance_uuid)
             except NotFoundError:
                 instance = None
             instance_cache[instance_uuid] = instance

@@ -29,6 +29,11 @@ pytestmark = pytest.mark.asyncio
 # 1. 核心 Fixtures (本文件提供，可被其他测试文件导入)
 # ==============================================================================
 
+@pytest.fixture
+async def client(prod_like_client: AsyncClient):
+    """资源域测试使用生产一致的请求级 Session 基线。"""
+    yield prod_like_client
+
 @pytest.fixture(params=["tool"]) # "knowledge" 也可以加入
 def resource_type(request):
     """一个参数化的 Fixture，为通用测试提供不同的资源类型。"""
@@ -185,15 +190,19 @@ class TestGenericResourceMetadata:
     async def test_update_resource_metadata_success(self, client: AsyncClient, auth_headers_factory: Callable, registered_user_with_pro: UserContext, created_resource: Resource, db_session: AsyncSession):
         """[参数化] 成功更新Resource元数据，并验证变更已同步到工作区实例。"""
         headers = await auth_headers_factory(registered_user_with_pro)
+        resource_uuid = created_resource.uuid
         payload = {"name": "Updated Name", "description": "Updated desc."}
-        response = await client.put(f"/api/v1/resources/{created_resource.uuid}", json=payload, headers=headers)
+        response = await client.put(f"/api/v1/resources/{resource_uuid}", json=payload, headers=headers)
 
         assert response.status_code == status.HTTP_200_OK
+        db_session.expunge_all()
         
         resource_dao = ResourceDao(db_session)
-        updated_resource = await resource_dao.get_one(where={"uuid": created_resource.uuid}, withs=["workspace_instance"])
+        updated_resource = await resource_dao.get_one(where={"uuid": resource_uuid}, withs=["workspace_instance"])
         assert updated_resource.name == payload["name"]
-        assert updated_resource.workspace_instance.name == payload["name"]
+        updated_instance = await ResourceInstanceDao(db_session).get_by_uuid(updated_resource.workspace_instance.uuid)
+        assert updated_instance is not None
+        assert updated_instance.name == payload["name"]
 
 class TestGenericInstanceVersioning:
     """[通用] 测试版本管理的核心流程：发布、归档。"""
@@ -201,6 +210,7 @@ class TestGenericInstanceVersioning:
     async def test_publish_instance_flow(self, client: AsyncClient, auth_headers_factory: Callable, registered_user_with_pro: UserContext, created_resource: Resource, db_session: AsyncSession):
         """[真正通用] 测试完整的发布流程，通过修改通用元数据来创造版本差异。"""
         headers = await auth_headers_factory(registered_user_with_pro)
+        resource_uuid = created_resource.uuid
         workspace_instance_uuid = created_resource.workspace_instance.uuid
 
         # --- 1. 发布 v1.0.0 ---
@@ -210,7 +220,7 @@ class TestGenericInstanceVersioning:
         
         # --- 2. 修改工作区草稿（通过更新资源元数据）---
         update_payload = {"name": "Version 1.1 Name"}
-        await client.put(f"/api/v1/resources/{created_resource.uuid}", json=update_payload, headers=headers)
+        await client.put(f"/api/v1/resources/{resource_uuid}", json=update_payload, headers=headers)
 
         # --- 3. 发布 v1.1.0 ---
         res_v2 = await client.post(f"/api/v1/instances/{workspace_instance_uuid}/publish", json={"version_tag": "1.1.0"}, headers=headers)
@@ -220,9 +230,10 @@ class TestGenericInstanceVersioning:
         # --- 4. 验证状态 ---
         resource_dao = ResourceDao(db_session)
         instance_dao = ResourceInstanceDao(db_session)
+        db_session.expunge_all()
 
         # 刷新 resource 以获取最新的 latest_published_instance_id
-        final_resource = await resource_dao.get_by_uuid(created_resource.uuid)
+        final_resource = await resource_dao.get_by_uuid(resource_uuid)
         v1_instance = await instance_dao.get_by_uuid(v1_uuid)
         v2_instance = await instance_dao.get_by_uuid(v2_uuid)
 
@@ -236,6 +247,7 @@ class TestGenericInstanceVersioning:
         res_v3 = await client.post(f"/api/v1/instances/{v2_uuid}/archive", json={}, headers=headers)
         assert res_v3.status_code == status.HTTP_200_OK, f"Archive v1.1.0 failed: {res_v3.text}"
         archived_uuid = res_v3.json()["data"]["uuid"]
+        db_session.expunge_all()
         archived_instance = await instance_dao.get_by_uuid(archived_uuid)
         assert archived_instance.uuid == v2_uuid
         assert archived_instance.status == VersionStatus.ARCHIVED

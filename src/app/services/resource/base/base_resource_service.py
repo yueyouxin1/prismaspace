@@ -80,17 +80,26 @@ class BaseResourceService(CommonResourceService):
             raise NotFoundError("Resource instance not found.")
         return instance
 
-    async def _get_full_instance_by_uuid(
+    async def _get_full_instance_and_service(
         self,
-        instance_uuid: str,
-        instance_stub: ResourceInstance | None = None
-    ) -> ResourceInstance:
+        instance_or_uuid: str | ResourceInstance
+    ) -> tuple[ResourceInstance, ResourceImplementationService]:
         """
-        按实例类型分发到具体实现服务，加载完整子类实例。
+        统一入口：返回“完整实例 + 对应实现服务”。
+        - 输入 uuid：按 uuid 获取服务并加载 full instance
+        - 输入实例：若是基类 stub，补齐 full；若已是子类实例，直接复用
         """
-        stub = instance_stub or await self._get_instance_stub_by_uuid(instance_uuid)
-        impl_service = await self._get_impl_service_by_type(stub.resource_type)
-        full_instance = await impl_service.get_by_uuid(stub.uuid)
+        if isinstance(instance_or_uuid, ResourceInstance):
+            impl_service = await self._get_impl_service_by_instance(instance_or_uuid)
+            if type(instance_or_uuid) is ResourceInstance:
+                full_instance = await impl_service.get_by_uuid(instance_or_uuid.uuid)
+                if not full_instance:
+                    raise NotFoundError("Resource instance not found.")
+                return full_instance, impl_service
+            return instance_or_uuid, impl_service
+
+        impl_service = await self._get_impl_service_by_instance(instance_or_uuid)
+        full_instance = await impl_service.get_by_uuid(instance_or_uuid)
         if not full_instance:
             raise NotFoundError("Resource instance not found.")
-        return full_instance
+        return full_instance, impl_service

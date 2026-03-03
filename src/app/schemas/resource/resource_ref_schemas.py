@@ -18,14 +18,14 @@ class ReferenceCreate(ReferenceBase):
 # --- 响应信息 ---
 class ReferenceRead(ReferenceBase):
     id: int
-    source_instance_uuid: str = Field(..., alias="source_instance.uuid")
-    
+    source_instance_uuid: str
+
     # 展开目标信息，方便前端展示
-    target_instance_uuid: str = Field(..., alias="target_instance.uuid")
-    target_resource_name: str = Field(..., alias="target_resource.name")
-    target_resource_type: str = Field(..., alias="target_resource.resource_type.name")
-    target_version_tag: str = Field(..., alias="target_instance.version_tag")
-    
+    target_instance_uuid: str
+    target_resource_name: str
+    target_resource_type: str
+    target_version_tag: str
+
     model_config = ConfigDict(from_attributes=True)
 
 class BatchSyncReferences(BaseModel):

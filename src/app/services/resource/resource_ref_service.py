@@ -16,14 +16,35 @@ class ResourceRefService(BaseResourceService):
 
     async def add_dependency(self, source_instance_uuid: str, ref_data: ReferenceCreate, actor: User) -> ReferenceRead:
         new_ref = await self._add_dependency(source_instance_uuid, ref_data, actor)
-        return ReferenceRead.model_validate(new_ref)
+        return self._to_reference_read(new_ref)
 
     async def remove_dependency(self, source_instance_uuid: str, target_instance_uuid: str, source_node_uuid: str = None, actor: User = None) -> None:
         return await self._remove_dependency(source_instance_uuid, target_instance_uuid, source_node_uuid, actor)
 
     async def list_dependencies(self, instance_uuid: str, actor: User) -> List[ReferenceRead]:
         refs = await self._list_dependencies(instance_uuid, actor)
-        return [ReferenceRead.model_validate(r) for r in refs]
+        return [self._to_reference_read(r) for r in refs]
+
+    def _to_reference_read(self, ref: ResourceRef) -> ReferenceRead:
+        source_instance = ref.source_instance
+        target_instance = ref.target_instance
+        target_resource = ref.target_resource
+        target_type = target_resource.resource_type if target_resource else None
+
+        if not source_instance or not target_instance or not target_resource or not target_type:
+            raise ServiceException("Reference relation graph is incomplete for serialization.")
+
+        return ReferenceRead(
+            id=ref.id,
+            source_node_uuid=ref.source_node_uuid,
+            alias=ref.alias,
+            options=ref.options,
+            source_instance_uuid=source_instance.uuid,
+            target_instance_uuid=target_instance.uuid,
+            target_resource_name=target_resource.name,
+            target_resource_type=target_type.name,
+            target_version_tag=target_instance.version_tag,
+        )
 
     # =================================================================
     # Reference Management (Dependency Sub-system)
@@ -78,14 +99,12 @@ class ResourceRefService(BaseResourceService):
         )
         self.db.add(new_ref)
         await self.db.flush()
-        
-        # 重新加载以返回完整信息（包含关联对象）
-        await self.db.refresh(new_ref)
-        # 手动填充关联对象以便 Schema 读取 (或者在 DAO 中 get_by_pk)
-        new_ref.target_instance = target_instance
-        new_ref.target_resource = target_instance.resource
-        
-        return new_ref
+
+        # 返回前按读模型一次性加载，确保序列化所需字段完整且无懒加载。
+        hydrated_ref = await self.dao.get_by_id_for_read(new_ref.id)
+        if not hydrated_ref:
+            raise NotFoundError("Created reference not found.")
+        return hydrated_ref
 
     async def _remove_dependency(self, source_instance_uuid: str, target_instance_uuid: str, source_node_uuid: str = None, actor: User = None) -> None:
         """

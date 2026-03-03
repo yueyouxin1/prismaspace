@@ -42,7 +42,6 @@ class ChatSessionRead(BaseModel):
 
 class ChatSessionUpdate(BaseModel):
     title: Optional[str] = None
-    is_archived: Optional[bool] = None
 
 # --- Message Schemas ---
 

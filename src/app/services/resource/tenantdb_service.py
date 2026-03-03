@@ -372,15 +372,18 @@ class TenantDbService(ResourceImplementationService):
     async def on_resource_delete(self, resource: Resource) -> None:
         """
         [Clean] 资源级物理删除。
-        契约保证：resource.workspace_instance 是 TenantDB 类型且已加载。
+        由实现层自行加载完整 TenantDB 实例后执行物理删除。
         """
-        instance: TenantDB = resource.workspace_instance
-        
-        # 直接访问子类字段 schema_name，无需任何查询或类型检查
-        print(f"[TenantDb] Dropping physical schema '{instance.schema_name}' for resource {resource.uuid}")
-        
-        # 执行物理删除
-        await self._execute_drop_schema(instance.schema_name)
+        instance_stub = resource.workspace_instance
+        if not instance_stub:
+            raise NotFoundError(f"Workspace instance not found for resource {resource.uuid}.")
+
+        full_instance = await self.get_by_uuid(instance_stub.uuid)
+        if not full_instance:
+            raise NotFoundError("TenantDB workspace instance not found.")
+
+        print(f"[TenantDb] Dropping physical schema '{full_instance.schema_name}' for resource {resource.uuid}")
+        await self._execute_drop_schema(full_instance.schema_name)
 
     async def publish_instance(self, workspace_instance: TenantDB, version_tag: str, version_notes: Optional[str], actor: User) -> TenantDB:
         """[关键实现] 创建元数据快照，不操作数据平面。"""

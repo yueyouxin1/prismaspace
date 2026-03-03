@@ -22,7 +22,11 @@ class ToolDao(BaseDao[Tool]):
                 Resource.id,
                 Resource.uuid,
                 Resource.workspace_id,
-                Resource.resource_type_id
+                Resource.resource_type_id,
+                Resource.name,
+                Resource.description,
+                Resource.workspace_instance_id,
+                Resource.latest_published_instance_id
             ),
             joinedload(Resource.workspace).options(
                 lazyload("*"),
