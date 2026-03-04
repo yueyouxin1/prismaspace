@@ -20,7 +20,7 @@ class MsgResponse(BaseModel):
     msg: str = "success"
 
 class SSEvent(BaseModel):
-    """Agent 运行时产生的原子事件"""
+    """运行时产生的原子事件"""
     event: str
     data: Dict[str, Any]
     

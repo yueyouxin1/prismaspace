@@ -1,69 +1,59 @@
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field, JsonValue
+
+from ag_ui.core import RunAgentInput, RunFinishedEvent
+from ag_ui.core.events import BaseEvent
+from ag_ui.core.types import ConfiguredBaseModel, Context, Message, Tool, ToolCall
 
 
-AgUiRole = Literal["developer", "system", "assistant", "user", "tool", "activity", "reasoning"]
+class AgUiResumeToolResult(ConfiguredBaseModel):
+    tool_call_id: str = Field(alias="toolCallId")
+    content: JsonValue = None
 
 
-class AgUiToolCallFunction(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+class AgUiResumePayload(ConfiguredBaseModel):
+    tool_results: List[AgUiResumeToolResult] = Field(default_factory=list, alias="toolResults")
 
+
+class AgUiResume(ConfiguredBaseModel):
+    interrupt_id: str = Field(alias="interruptId")
+    payload: AgUiResumePayload = Field(default_factory=AgUiResumePayload)
+
+
+class AgUiInterruptToolCall(ConfiguredBaseModel):
+    tool_call_id: str = Field(alias="toolCallId")
     name: str
-    arguments: str
+    arguments: JsonValue = Field(default_factory=dict)
 
 
-class AgUiToolCall(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    id: str
-    type: Literal["function"] = "function"
-    function: AgUiToolCallFunction
-    encrypted_value: Optional[str] = Field(default=None, alias="encryptedValue")
+class AgUiInterruptPayload(ConfiguredBaseModel):
+    tool_calls: List[AgUiInterruptToolCall] = Field(default_factory=list, alias="toolCalls")
 
 
-class AgUiMessage(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    id: str
-    role: AgUiRole
-    content: Optional[Any] = None
-    name: Optional[str] = None
-    tool_calls: Optional[List[AgUiToolCall]] = Field(default=None, alias="toolCalls")
-    tool_call_id: Optional[str] = Field(default=None, alias="toolCallId")
-    error: Optional[str] = None
-    encrypted_value: Optional[str] = Field(default=None, alias="encryptedValue")
-    activity_type: Optional[str] = Field(default=None, alias="activityType")
+class AgUiInterrupt(ConfiguredBaseModel):
+    id: Optional[str] = None
+    reason: Optional[str] = None
+    payload: Optional[AgUiInterruptPayload] = None
 
 
-class AgUiTool(BaseModel):
-    name: str
-    description: str
-    parameters: Any
-
-
-class AgUiContext(BaseModel):
-    description: str
-    value: str
-
-
-class AgUiResume(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    interrupt_id: Optional[str] = Field(default=None, alias="interruptId")
-    payload: Any = None
-
-
-class AgUiRunAgentInput(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    thread_id: str = Field(alias="threadId")
-    run_id: str = Field(alias="runId")
-    parent_run_id: Optional[str] = Field(default=None, alias="parentRunId")
-    state: Any = Field(default_factory=dict)
-    messages: List[AgUiMessage] = Field(default_factory=list)
-    tools: List[AgUiTool] = Field(default_factory=list)
-    context: List[AgUiContext] = Field(default_factory=list)
-    forwarded_props: Any = Field(default_factory=dict, alias="forwardedProps")
+class RunAgentInputExt(RunAgentInput):
     resume: Optional[AgUiResume] = None
 
+
+class RunFinishedEventExt(RunFinishedEvent):
+    outcome: Optional[Literal["success", "interrupt", "cancelled"]] = None
+    interrupt: Optional[AgUiInterrupt] = None
+
+
+class RunEventsResponse(ConfiguredBaseModel):
+    thread_id: str = Field(alias="threadId")
+    run_id: str = Field(alias="runId")
+    events: List[Dict[str, JsonValue]]
+
+
+AgUiMessage: TypeAlias = Message
+AgUiTool: TypeAlias = Tool
+AgUiContext: TypeAlias = Context
+AgUiToolCall: TypeAlias = ToolCall
+AgUiBaseEvent: TypeAlias = BaseEvent

@@ -10,11 +10,12 @@ from app.models.interaction.chat import ChatMessage
 from app.models.resource.agent import AgentMemoryVar, AgentContextSummary
 from app.models.resource.tool import Tool
 from app.engine.model.llm import LLMMessage, LLMTool, LLMToolFunction
-from app.engine.agent import BaseToolExecutor
+from app.engine.agent import BaseToolExecutor, ToolExecutionInterrupt
 from app.schemas.resource.agent.agent_schemas import AgentConfig, AgentRAGConfig, DeepMemoryConfig
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig, KnowledgeBaseExecutionRequest, KnowledgeBaseExecutionParams, SearchResultChunk
 from app.schemas.resource.execution_schemas import AnyExecutionRequest
 from app.services.exceptions import ServiceException, NotFoundError
+from app.services.resource.agent.message_content import chat_message_to_text
 
 # Lazy imports to avoid circular dependency loops during initialization
 from app.services.resource.agent.agent_session_manager import AgentSessionManager
@@ -176,11 +177,13 @@ class ResourceAwareToolExecutor(BaseToolExecutor):
     def get_llm_tools(self) -> List[LLMTool]:
         return self.llm_tools_def
 
-    def requires_client_execution(self, tool_name: str) -> bool:
-        return tool_name in self.client_side_tools
-
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
         """统一执行入口"""
+        if tool_name in self.client_side_tools:
+            return ToolExecutionInterrupt(
+                payload={"tool_name": tool_name, "tool_args": tool_args}
+            )
+
         # 1. 优先检查本地函数 (Fast Path)
         if tool_name in self.local_functions:
             try:
@@ -285,7 +288,7 @@ class DeepMemorySkillsProcessor(BaseSkillProcessor):
             msgs = await self.long_term_service.retrieve_by_trace_id_direct(context_id)
             if not msgs:
                 return "Context not found or expired."
-            return "\n".join([f"{m.role.value}: {m.content}" for m in msgs])
+            return "\n".join([f"{m.role.value}: {chat_message_to_text(m)}" for m in msgs])
         
         # 定义 Tool Schema
         tool_def = LLMTool(
@@ -446,10 +449,15 @@ class ShortContextProcessor(BaseContextProcessor):
         for m in recent_msgs:
             if m.trace_id:
                 trace_ids.add(m.trace_id)
-                
+
+            role_value = m.role.value if m.role.value in {"system", "user", "assistant", "tool"} else "system"
+            content_value = chat_message_to_text(m)
+            if m.role.value in {"developer", "reasoning", "activity"} and content_value:
+                content_value = f"[{m.role.value.upper()}] {content_value}"
+
             llm_msgs.append(LLMMessage(
-                role=m.role.value,
-                content=m.content,
+                role=role_value,
+                content=content_value,
                 tool_calls=m.tool_calls,
                 tool_call_id=m.tool_call_id
             ))
@@ -839,7 +847,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
                         trace_id = turn[0].trace_id
                         if trace_id:
                             # 注意：这里我们 NOT update ctx.exclude_trace_ids
-                            turn_content = "\n".join([f"{msg.role.value}: {msg.content}" for msg in turn])
+                            turn_content = "\n".join([f"{msg.role.value}: {chat_message_to_text(msg)}" for msg in turn])
                             blocks.append(f"--- History (ID: {trace_id}) ---\n{turn_content}")
                     if blocks:
                         full_recall_text = "\n### Recalled Conversation:\n" + "\n\n".join(blocks)

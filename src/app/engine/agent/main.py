@@ -3,13 +3,23 @@
 import asyncio
 import logging
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .base import (
-    AgentInput, AgentResult, AgentStep, AgentEngineCallbacks, 
-    BaseToolExecutor
+    AgentInput, AgentResult, AgentStep, AgentClientToolCall, AgentEngineCallbacks,
+    BaseToolExecutor, ToolExecutionInterrupt
 )
-from ..model.llm import LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMToolCall, LLMUsage, LLMResult, LLMEngineCallbacks
+from ..model.llm import (
+    LLMEngineService,
+    LLMProviderConfig,
+    LLMRunConfig,
+    LLMMessage,
+    LLMToolCall,
+    LLMToolCallChunk,
+    LLMUsage,
+    LLMResult,
+    LLMEngineCallbacks,
+)
 
 class AgentEngineService:
     """
@@ -23,6 +33,24 @@ class AgentEngineService:
     ):
         self.llm_engine = llm_engine or LLMEngineService()
         self.max_iterations = max_iterations
+
+    @staticmethod
+    def _resolve_interrupt_tool_call(
+        tool_call: LLMToolCall,
+        parsed_tool_args: Optional[dict],
+        interrupt: ToolExecutionInterrupt,
+    ) -> AgentClientToolCall:
+        payload = interrupt.payload if isinstance(interrupt.payload, dict) else {}
+        tool_call_id = payload.get("toolCallId") or payload.get("tool_call_id") or tool_call.id
+        tool_name = payload.get("name") or payload.get("tool_name") or tool_call.function.get("name", "")
+        arguments: Any = payload.get("arguments")
+        if arguments is None:
+            arguments = payload.get("tool_args", parsed_tool_args if parsed_tool_args is not None else {})
+        return AgentClientToolCall(
+            tool_call_id=str(tool_call_id),
+            name=str(tool_name),
+            arguments=arguments,
+        )
 
     async def run(
         self,
@@ -39,13 +67,15 @@ class AgentEngineService:
             if callbacks: await callbacks.on_agent_start()
             
             message_history = agent_input.messages.copy()
-            intermediate_steps = []
+            intermediate_steps: List[AgentStep] = []
+            all_reasoning_parts: List[str] = []
 
             # 初始化总用量计数器
             total_usage = LLMUsage()
 
             # --- 步骤 2: 启动 ReAct 循环 ---
             for _ in range(self.max_iterations):
+                round_reasoning_chunks: List[str] = []
 
                 # --- 内部 LLM 回调处理器 ---
                 # 这个回调类现在只负责"透传"流式状态给上层 UI，不再负责控制流逻辑
@@ -55,11 +85,17 @@ class AgentEngineService:
                         if callbacks: await callbacks.on_final_chunk_generated(chunk)
 
                     async def on_reasoning_chunk(self, chunk: str):
+                        if chunk:
+                            round_reasoning_chunks.append(chunk)
                         if callbacks: await callbacks.on_reasoning_chunk_generated(chunk)
                     
                     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]):
                         # 通知 UI 模型正在请求工具
                         if callbacks: await callbacks.on_tool_calls_generated(tool_calls)
+
+                    async def on_tool_call_chunk(self, chunk: LLMToolCallChunk):
+                        if callbacks:
+                            await callbacks.on_tool_call_chunk_generated(chunk)
 
                     async def on_cancel(self, result: LLMResult):
                         # 处理取消事件
@@ -68,10 +104,12 @@ class AgentEngineService:
                                 total_usage.prompt_tokens += result.usage.prompt_tokens
                                 total_usage.completion_tokens += result.usage.completion_tokens
                                 total_usage.total_tokens += result.usage.total_tokens
+                            reasoning_content = "".join(all_reasoning_parts + round_reasoning_chunks) or result.reasoning_content
                             agent_result = AgentResult(
                                 message=result.message,
                                 steps=intermediate_steps,
                                 usage=total_usage, # 返回累加后的总用量
+                                reasoning_content=reasoning_content,
                                 outcome="cancelled",
                             )                            
                             await callbacks.on_agent_cancel(agent_result)
@@ -104,6 +142,11 @@ class AgentEngineService:
                     total_usage.completion_tokens += llm_result.usage.completion_tokens
                     total_usage.total_tokens += llm_result.usage.total_tokens
 
+                round_reasoning = "".join(round_reasoning_chunks) if round_reasoning_chunks else (llm_result.reasoning_content or "")
+                if round_reasoning:
+                    all_reasoning_parts.append(round_reasoning)
+                aggregated_reasoning = "".join(all_reasoning_parts) or None
+
                 # --- 步骤 3: 决策与行动 ---
                 assistant_msg = llm_result.message
                 
@@ -125,14 +168,11 @@ class AgentEngineService:
                             try:
                                 tool_args = json.loads(arguments_str)
                             except json.JSONDecodeError:
-                                return tc, {"error": "Invalid JSON arguments provided."}
-
-                            if tool_executor.requires_client_execution(tool_name):
-                                return tc, {"__ag_ui_interrupt__": True, "tool_name": tool_name, "tool_args": tool_args}
+                                return tc, {"error": "Invalid JSON arguments provided."}, None
 
                             # 执行工具
                             observation = await tool_executor.execute(tool_name, tool_args)
-                            return tc, observation
+                            return tc, observation, tool_args
 
                         tasks.append(execute_tool_task(tool_call))
 
@@ -140,21 +180,38 @@ class AgentEngineService:
                     tool_results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     # 处理结果并更新历史
-                    pending_tool_calls: List[LLMToolCall] = []
+                    client_tool_calls: List[AgentClientToolCall] = []
+                    round_thought_persisted = False
                     for i, result in enumerate(tool_results):
                         original_tool_call = tool_calls_objects[i]
+                        parsed_tool_args: Optional[dict] = None
                         
                         if isinstance(result, Exception):
                             observation = f'{{"error": "Tool execution failed unexpectedly.", "details": "{str(result)}"}}'
                         else:
-                            _, observation = result
+                            _, observation, parsed_tool_args = result
 
-                        if isinstance(observation, dict) and observation.get("__ag_ui_interrupt__") is True:
-                            pending_tool_calls.append(original_tool_call)
+                        if isinstance(observation, ToolExecutionInterrupt):
+                            client_tool_calls.append(
+                                self._resolve_interrupt_tool_call(
+                                    tool_call=original_tool_call,
+                                    parsed_tool_args=parsed_tool_args,
+                                    interrupt=observation,
+                                )
+                            )
                             continue
 
+                        step_thought = None
+                        if round_reasoning and not round_thought_persisted:
+                            step_thought = round_reasoning
+                            round_thought_persisted = True
+
                         # 记录步骤
-                        step = AgentStep(action=original_tool_call, observation=observation)
+                        step = AgentStep(
+                            thought=step_thought,
+                            action=original_tool_call,
+                            observation=observation,
+                        )
                         intermediate_steps.append(step)
                         if callbacks: await callbacks.on_agent_step(step)
                         
@@ -165,12 +222,13 @@ class AgentEngineService:
                             content=json.dumps(observation, ensure_ascii=False)
                         ))
 
-                    if pending_tool_calls:
+                    if client_tool_calls:
                         interrupt_result = AgentResult(
                             message=assistant_msg,
                             steps=intermediate_steps,
                             usage=total_usage,
-                            pending_tool_calls=pending_tool_calls,
+                            client_tool_calls=client_tool_calls,
+                            reasoning_content=aggregated_reasoning,
                             outcome="interrupted",
                         )
                         if callbacks:
@@ -187,6 +245,7 @@ class AgentEngineService:
                         message=assistant_msg,
                         steps=intermediate_steps,
                         usage=total_usage, # 返回累加后的总用量
+                        reasoning_content=aggregated_reasoning,
                         outcome="completed",
                     )
                     if callbacks: await callbacks.on_agent_finish(result)

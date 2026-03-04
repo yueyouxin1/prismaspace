@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
-from ..model.llm.base import LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMUsage
+from ..model.llm.base import LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMToolCallChunk, LLMUsage
 
 # --- Agent 引擎的输入输出模型 ---
 class AgentInput(BaseModel):
@@ -16,13 +16,30 @@ class AgentStep(BaseModel):
     action: LLMToolCall = Field(..., description="模型决定执行的动作")
     observation: Any = Field(..., description="执行动作后返回的观察结果")
 
+
+class AgentClientToolCall(BaseModel):
+    """引擎级客户端工具调用描述。"""
+    tool_call_id: str
+    name: str
+    arguments: Any = Field(default_factory=dict)
+
 class AgentResult(BaseModel):
     """Agent 引擎的最终输出"""
     message: LLMMessage
     steps: List[AgentStep] = Field([], description="完整的思维链步骤")
     usage: LLMUsage = Field(default_factory=LLMUsage, description="整个Agent执行过程中的总Token用量")
-    pending_tool_calls: List[LLMToolCall] = Field(default_factory=list, description="等待客户端执行并回传结果的工具调用")
+    client_tool_calls: List[AgentClientToolCall] = Field(default_factory=list, description="等待客户端执行并回传结果的工具调用")
+    reasoning_content: Optional[str] = Field(None, description="聚合后的模型思考内容")
     outcome: Literal["completed", "interrupted", "cancelled", "error"] = "completed"
+
+
+class ToolExecutionInterrupt(BaseModel):
+    """
+    引擎级中断信号。
+    由 ToolExecutor.execute 返回，用于声明“该工具需外部执行后再恢复”。
+    """
+    kind: Literal["interrupt"] = "interrupt"
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 # --- Agent 引擎的回调协议 ---
 class AgentEngineCallbacks(ABC):
@@ -37,6 +54,10 @@ class AgentEngineCallbacks(ABC):
     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]) -> None:
         """当模型决定调用工具时调用。"""
         ...
+
+    async def on_tool_call_chunk_generated(self, chunk: LLMToolCallChunk) -> None:
+        """可选回调：当模型流式返回工具调用参数增量时调用。"""
+        return None
 
     @abstractmethod
     async def on_agent_step(self, step: AgentStep) -> None:
@@ -87,10 +108,3 @@ class BaseToolExecutor(ABC):
     @abstractmethod
     def get_llm_tools(self) -> List[LLMTool]:
         ...
-
-    def requires_client_execution(self, tool_name: str) -> bool:
-        """
-        返回 True 表示该工具应由客户端执行并回传结果，而不是由服务端直接执行。
-        默认 False，保持既有行为。
-        """
-        return False

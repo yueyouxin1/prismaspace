@@ -4,6 +4,8 @@ from .base import (
     AgentInput,
     AgentStep,
     AgentResult,
+    AgentClientToolCall,
     AgentEngineCallbacks,
-    BaseToolExecutor
+    BaseToolExecutor,
+    ToolExecutionInterrupt,
 )

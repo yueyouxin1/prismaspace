@@ -5,9 +5,7 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator, conint, conf
 from typing import Literal, Union, Dict, List, Any, Optional
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig
-from app.schemas.common import SSEvent, ExecutionRequest, ExecutionResponse
 from app.engine.model.llm import LLMMessage
-from app.engine.agent import AgentResult
 
 # ==============================================================================
 # 1. 配置子模型 (Sub-Configuration Models)
@@ -144,37 +142,3 @@ class AgentUpdate(AgentSchema, InstanceUpdate):
 class AgentRead(InstanceRead, AgentSchema):
     model_config = ConfigDict(from_attributes=True)
 
-# ==============================================================================
-# 4. Execution Schemas
-# ==============================================================================
-
-class AgentEvent(SSEvent):
-    """Agent 运行时产生的原子事件"""
-    event: Literal[
-        "message.delta",
-        "reasoning.delta",
-        "tool.started",
-        "tool.delta",
-        "tool.finished",
-        "reference",
-        "usage",
-        "done",
-        "error",
-    ]
-
-class AgentExecutionInputs(BaseModel):
-    input_query: Optional[str] = Field(default="", description="用户的最新输入。支持在恢复流中为空。")
-    session_uuid: Optional[str] = Field(None, description="会话UUID。若提供则进行有状态对话。")
-    # history 仅用于无状态调用的补充，session_uuid 优先
-    history: Optional[List[LLMMessage]] = Field(None, description="无状态模式下的历史消息")
-
-class AgentExecutionRequest(ExecutionRequest):
-    inputs: AgentExecutionInputs
-
-class AgentExecutionResponseData(BaseModel):
-    agent_result: Optional[AgentResult] = Field(None)
-    session_uuid: Optional[str] = Field(None)
-    trace_id: Optional[str] = Field(None)
-
-class AgentExecutionResponse(ExecutionResponse):
-    data: AgentExecutionResponseData

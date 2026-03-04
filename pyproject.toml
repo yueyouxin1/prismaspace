@@ -8,6 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.10.12,<3.13"
 dependencies = [
+    "ag-ui-protocol (==0.1.13)",
     "funasr (>=1.2.7,<2.0.0)",
     "funasr-onnx (>=0.4.1,<0.5.0)",
     "langsegment (>=0.2.0,<0.3.0)",

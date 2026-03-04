@@ -8,7 +8,7 @@ from openai import APIError, RateLimitError, AuthenticationError, APITimeoutErro
 
 from ..base import (
     LLMProviderConfig, LLMRunConfig, LLMMessage, LLMEngineCallbacks, 
-    LLMToolCall, LLMUsage, LLMResult, LLMEngineError, LLMAuthenticationError, 
+    LLMToolCall, LLMToolCallChunk, LLMUsage, LLMResult, LLMEngineError, LLMAuthenticationError,
     LLMRateLimitError, LLMContextLengthExceededError, LLMBadRequestError
 )
 from ._base import LLMClientBase
@@ -49,6 +49,22 @@ class OpenAIClient(LLMClientBase):
                     tool_calls = choice.delta.tool_calls
                     if tool_calls:
                         for tool_call_chunk in tool_calls:
+                            chunk_index = int(getattr(tool_call_chunk, "index", 0) or 0)
+                            function_chunk = getattr(tool_call_chunk, "function", None)
+                            tool_name_delta = getattr(function_chunk, "name", None) if function_chunk else None
+                            arguments_delta = getattr(function_chunk, "arguments", None) if function_chunk else None
+                            tool_call_id = getattr(tool_call_chunk, "id", None)
+
+                            if callbacks and (tool_call_id or tool_name_delta or arguments_delta):
+                                await callbacks.on_tool_call_chunk(
+                                    LLMToolCallChunk(
+                                        index=chunk_index,
+                                        tool_call_id=tool_call_id,
+                                        tool_name=tool_name_delta,
+                                        arguments_delta=arguments_delta,
+                                    )
+                                )
+
                             if len(tool_calls_buffer) <= tool_call_chunk.index:
                                 tool_calls_buffer.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                             

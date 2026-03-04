@@ -36,7 +36,16 @@ class LLMClientBase:
         # 将消息列表还原为文本 (这里做一个简单的拼接，生产环境可以使用更精确的 chat format 估算)
         prompt_text = ""
         for msg in messages:
-            content = msg.content or ""
+            if isinstance(msg.content, str):
+                content = msg.content
+            elif isinstance(msg.content, list):
+                content = " ".join(
+                    str(item.get("text", ""))
+                    for item in msg.content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+            else:
+                content = ""
             if msg.tool_calls:
                 content += str(msg.tool_calls)
             prompt_text += content

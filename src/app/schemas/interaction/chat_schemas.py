@@ -49,6 +49,11 @@ class ChatMessageRead(BaseModel):
     uuid: str
     role: MessageRole
     content: Optional[str]
+    text_content: Optional[str] = None
+    content_parts: Optional[List[Dict[str, Any]]] = None
+    reasoning_content: Optional[str] = None
+    activity_type: Optional[str] = None
+    encrypted_value: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None

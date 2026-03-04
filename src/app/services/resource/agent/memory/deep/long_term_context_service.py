@@ -15,6 +15,7 @@ from app.dao.interaction.chat_dao import ChatMessageDao
 from app.dao.resource.resource_dao import ResourceInstanceDao
 from app.dao.module.service_module_dao import ServiceModuleVersionDao
 from app.services.module.embedding_service import EmbeddingService
+from app.services.resource.agent.message_content import chat_message_to_text
 from app.system.vectordb.constants import AGENT_LONG_TERM_CONTEXT_COLLECTION
 from app.services.exceptions import ConfigurationError, ServiceException, NotFoundError
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
@@ -63,7 +64,7 @@ class LongTermContextService(BaseService):
         buffer = []
         for msg in messages:
             role_tag = msg.role.value.upper()
-            content = msg.content or ""
+            content = chat_message_to_text(msg)
             
             # 特殊处理 Tool Calls 的显示，增加语义可读性
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:

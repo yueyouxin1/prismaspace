@@ -1,46 +1,58 @@
-# src/app/api/v1/agent.py
+import json
 
 from fastapi import APIRouter, WebSocket, Depends, Body
 from fastapi.responses import StreamingResponse
+from ag_ui.encoder import EventEncoder
+
 from app.core.context import AppContext
 from app.api.dependencies.context import AuthContextDep
 from app.api.dependencies.ws_auth import get_ws_auth, AuthContext
 from app.schemas.common import JsonResponse
-from app.schemas.resource.agent.agent_schemas import AgentExecutionRequest, AgentExecutionResponse
-from app.schemas.protocol import AgUiRunAgentInput
+from app.schemas.protocol import RunAgentInputExt, RunEventsResponse
 from app.services.resource.agent.agent_service import AgentService
-from app.services.resource.agent.ag_ui_adapter import AgUiAgentAdapter, encode_sse_data
 from .ws_handler import AgentSessionHandler
 from app.services.exceptions import ServiceException
 
 router = APIRouter()
 
-@router.post("/{uuid}/execute", response_model=JsonResponse[AgentExecutionResponse], summary="Blocking Execution")
+@router.post("/{uuid}/execute", response_model=JsonResponse[RunEventsResponse], summary="AG-UI Run (Non-stream)")
 async def execute_agent(
     uuid: str,
-    request: AgentExecutionRequest,
+    request: RunAgentInputExt,
     context: AppContext = AuthContextDep
 ):
     service = AgentService(context)
     result = await service.execute(uuid, request, context.actor)
-    # result is ExecutionResult, wrap it
     return JsonResponse(data=result)
 
 @router.post("/{uuid}/sse", summary="AG-UI Run (SSE)")
 async def stream_agent(
     uuid: str,
-    request: AgUiRunAgentInput = Body(...),
+    request: RunAgentInputExt = Body(...),
     context: AppContext = AuthContextDep
 ):
     service = AgentService(context)
-    adapter = AgUiAgentAdapter(service)
+    encoder = EventEncoder()
+
+    def _encode(event):
+        if hasattr(event, "model_dump"):
+            return encoder.encode(event)
+        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     async def sse_generator():
+        run_result = None
+        cancel_fn = None
         try:
-            async for event in adapter.stream_events(uuid, request, context.actor):
-                yield encode_sse_data(event)
+            run_result = await service.async_execute(uuid, request, context.actor)
+            cancel_fn = getattr(run_result, "cancel", None)
+            async for event in run_result.generator:
+                yield _encode(event)
+        except GeneratorExit:
+            if callable(cancel_fn):
+                cancel_fn()
+            raise
         except ServiceException as exc:
-            yield encode_sse_data({
+            yield _encode({
                 "type": "RUN_ERROR",
                 "threadId": request.thread_id,
                 "runId": request.run_id,
@@ -49,7 +61,7 @@ async def stream_agent(
                 "retriable": False,
             })
         except Exception as exc:
-            yield encode_sse_data({
+            yield _encode({
                 "type": "RUN_ERROR",
                 "threadId": request.thread_id,
                 "runId": request.run_id,
@@ -57,6 +69,9 @@ async def stream_agent(
                 "message": str(exc),
                 "retriable": False,
             })
+        finally:
+            if callable(cancel_fn):
+                cancel_fn()
 
     return StreamingResponse(
         sse_generator(),

@@ -24,9 +24,16 @@ from app.dao.product.feature_dao import FeatureDao
 
 # Schemas
 from app.schemas.resource.agent.agent_schemas import (
-    AgentUpdate, AgentRead, AgentEvent, AgentExecutionRequest, AgentExecutionResponse, AgentExecutionResponseData, 
-    AgentExecutionInputs, AgentConfig, GenerationDiversity, AgentRAGConfig, ModelParams, 
+    AgentUpdate, AgentRead, AgentConfig, GenerationDiversity, AgentRAGConfig, ModelParams,
     InputOutputConfig, DeepMemoryConfig
+)
+from app.schemas.protocol import (
+    AgUiInterrupt,
+    AgUiInterruptPayload,
+    AgUiInterruptToolCall,
+    RunFinishedEventExt,
+    RunAgentInputExt,
+    RunEventsResponse,
 )
 from app.schemas.resource.knowledge.knowledge_schemas import KnowledgeBaseExecutionRequest, KnowledgeBaseExecutionParams, SearchResultChunk
 from app.services.auditing.types.attributes import (
@@ -46,20 +53,44 @@ from app.services.resource.agent.memory.deep.long_term_context_service import Lo
 from app.services.resource.agent.memory.deep.context_summary_service import ContextSummaryService
 from app.services.resource.agent.pipeline_manager import AgentPipelineManager
 from app.services.resource.agent.processors import ResourceAwareToolExecutor
+from app.services.resource.agent.ag_ui_normalizer import AgUiNormalizer
+from app.services.resource.agent.ag_ui_processor import AgUiProcessor
 from app.services.exceptions import ServiceException, NotFoundError, ConfigurationError
 from app.services.product.types.feature import FeatureRole
 from app.services.resource.agent.types.agent import AgentRunResult
 
 # Engine
 from app.engine.agent import (
-    AgentEngineService, AgentInput, AgentStep, AgentResult, AgentEngineCallbacks, BaseToolExecutor
+    AgentEngineService, AgentInput, AgentStep, AgentResult, AgentClientToolCall, AgentEngineCallbacks, BaseToolExecutor
 )
 from app.engine.model.llm import (
-    LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMToolFunction, LLMUsage, LLMEngineCallbacks
+    LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMToolCallChunk, LLMUsage, LLMEngineCallbacks
 )
 from app.engine.utils.tokenizer.manager import tokenizer_manager
+from ag_ui.core import (
+    CustomEvent,
+    EventType,
+    MessagesSnapshotEvent,
+    ReasoningEndEvent,
+    ReasoningMessageContentEvent,
+    ReasoningMessageEndEvent,
+    ReasoningMessageStartEvent,
+    ReasoningStartEvent,
+    RunErrorEvent,
+    RunStartedEvent,
+    StateDeltaEvent,
+    StateSnapshotEvent,
+    TextMessageContentEvent,
+    TextMessageEndEvent,
+    TextMessageStartEvent,
+    ToolCallArgsEvent,
+    ToolCallEndEvent,
+    ToolCallResultEvent,
+    ToolCallStartEvent,
+)
 
 logger = logging.getLogger(__name__)
+
 
 class PersistingAgentCallbacks(AgentEngineCallbacks):
     """
@@ -70,93 +101,358 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         usage_accumulator: UsageAccumulator,
         generator_manager: AsyncGeneratorManager, 
         session_manager: Optional[AgentSessionManager] = None, 
-        trace_id: Optional[str] = None
+        trace_id: Optional[str] = None,
+        run_input: Optional[RunAgentInputExt] = None,
     ):
         self.trace_id = trace_id
         self.session_manager = session_manager
         self.generator_manager = generator_manager
         self.usage_accumulator = usage_accumulator
+        self.run_input = run_input
+        self.input_payload = (
+            run_input.model_dump(mode="json", by_alias=True, exclude_none=True)
+            if run_input
+            else {}
+        )
+        self.messages_snapshot = self.input_payload.get("messages", []) if isinstance(self.input_payload, dict) else []
         self.final_result: Optional[AgentResult] = None
         self.has_terminal_event = False
-        self.reasoning_chunks: List[str] = []
+        self.assistant_message_id = (
+            f"assistant-{run_input.run_id}" if run_input else f"assistant-{self.trace_id}"
+        )
+        self.reasoning_message_id = (
+            f"reasoning-{run_input.run_id}" if run_input else f"reasoning-{self.trace_id}"
+        )
+        self.text_started = False
+        self.reasoning_started = False
+        self.tool_call_stream_states: Dict[str, Dict[str, Any]] = {}
+        self.tool_call_index_states: Dict[int, Dict[str, Any]] = {}
 
-    def _base_event_data(self) -> Dict[str, Any]:
+    def _base_meta(self) -> Dict[str, Any]:
         session_uuid = self.session_manager.session.uuid if self.session_manager and self.session_manager.session else None
         return {
-            "trace_id": self.trace_id,
-            "session_uuid": session_uuid,
-            "turn_id": self.trace_id,
+            "traceId": self.trace_id,
+            "sessionUuid": session_uuid,
+            "turnId": self.trace_id,
             "ts": int(time.time() * 1000),
         }
 
-    async def _emit(self, event: str, payload: Dict[str, Any]):
-        merged_payload = {
-            **self._base_event_data(),
-            **payload,
-        }
-        await self.generator_manager.put(AgentEvent(event=event, data=merged_payload))
+    async def _emit(self, event: Any):
+        await self.generator_manager.put(event)
+
+    async def _emit_custom(self, name: str, value: Any):
+        await self._emit(
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name=name,
+                value=value,
+            )
+        )
+
+    @staticmethod
+    def _normalize_tool_args(tool_args: Any) -> str:
+        if isinstance(tool_args, str):
+            return tool_args
+        if tool_args is None:
+            return ""
+        return json.dumps(tool_args, ensure_ascii=False)
+
+    async def _emit_tool_call_start(self, tool_call_id: str, tool_name: str):
+        await self._emit(
+            ToolCallStartEvent(
+                type=EventType.TOOL_CALL_START,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                parent_message_id=self.assistant_message_id,
+            )
+        )
+
+    async def _emit_tool_call_args(self, tool_call_id: str, delta: str):
+        await self._emit(
+            ToolCallArgsEvent(
+                type=EventType.TOOL_CALL_ARGS,
+                tool_call_id=tool_call_id,
+                delta=delta,
+            )
+        )
+
+    async def _emit_tool_call_end(self, tool_call_id: str):
+        await self._emit(
+            ToolCallEndEvent(
+                type=EventType.TOOL_CALL_END,
+                tool_call_id=tool_call_id,
+            )
+        )
+
+    async def _close_open_messages(self):
+        if self.text_started:
+            self.text_started = False
+            await self._emit(
+                TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=self.assistant_message_id,
+                )
+            )
+        if self.reasoning_started:
+            self.reasoning_started = False
+            await self._emit(
+                ReasoningMessageEndEvent(
+                    type=EventType.REASONING_MESSAGE_END,
+                    message_id=self.reasoning_message_id,
+                )
+            )
+            await self._emit(
+                ReasoningEndEvent(
+                    type=EventType.REASONING_END,
+                    message_id=self.reasoning_message_id,
+                )
+            )
 
     async def on_agent_start(self):
-        await self._emit("message.delta", {"delta": "", "phase": "start"})
+        if not self.run_input:
+            return
+        await self._emit(
+            RunStartedEvent(
+                type=EventType.RUN_STARTED,
+                thread_id=self.run_input.thread_id,
+                run_id=self.run_input.run_id,
+                parent_run_id=self.run_input.parent_run_id,
+                input=self.input_payload,
+            )
+        )
+        await self._emit(
+            MessagesSnapshotEvent(
+                type=EventType.MESSAGES_SNAPSHOT,
+                messages=self.messages_snapshot,
+            )
+        )
+        await self._emit(
+            StateSnapshotEvent(
+                type=EventType.STATE_SNAPSHOT,
+                snapshot=self.run_input.state,
+            )
+        )
+        await self._emit(
+            StateDeltaEvent(
+                type=EventType.STATE_DELTA,
+                delta=[{"op": "add", "path": "/runStatus", "value": "running"}],
+            )
+        )
+        await self._emit_custom("ps.meta.trace", self._base_meta())
 
     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]):
-        tool_calls_data = [tc.model_dump() for tc in tool_calls]
-        await self._emit("tool.started", {"tool_calls": tool_calls_data})
+        tool_calls_data = [tc.model_dump(mode="json") for tc in tool_calls]
+        for tool_call in tool_calls_data:
+            function = tool_call.get("function", {}) or {}
+            tool_call_id = tool_call.get("id", "")
+            tool_name = function.get("name", "")
+            tool_args = self._normalize_tool_args(function.get("arguments", "{}"))
+
+            state = self.tool_call_stream_states.get(tool_call_id)
+            if not state:
+                state = {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "started": False,
+                    "args_emitted": False,
+                    "ended": False,
+                    "pending_args": [],
+                }
+                self.tool_call_stream_states[tool_call_id] = state
+
+            if tool_name and not state.get("tool_name"):
+                state["tool_name"] = tool_name
+
+            if not state.get("started"):
+                await self._emit_tool_call_start(
+                    tool_call_id=tool_call_id,
+                    tool_name=state.get("tool_name", "") or "",
+                )
+                state["started"] = True
+
+            if not state.get("args_emitted") and tool_args:
+                await self._emit_tool_call_args(tool_call_id=tool_call_id, delta=tool_args)
+                state["args_emitted"] = True
+
+            if not state.get("ended"):
+                await self._emit_tool_call_end(tool_call_id=tool_call_id)
+                state["ended"] = True
+
+        # 一轮工具调用收口后清理状态，避免跨轮污染。
+        self.tool_call_stream_states.clear()
+        self.tool_call_index_states.clear()
+
         if self.session_manager:
             self.session_manager.buffer_message(role=MessageRole.ASSISTANT, tool_calls=tool_calls_data)
-            
+
+    async def on_tool_call_chunk_generated(self, chunk: LLMToolCallChunk):
+        index_state = self.tool_call_index_states.setdefault(
+            chunk.index,
+            {
+                "tool_call_id": None,
+                "tool_name": "",
+                "started": False,
+                "args_emitted": False,
+                "ended": False,
+                "pending_args": [],
+            },
+        )
+
+        if chunk.tool_name:
+            index_state["tool_name"] = chunk.tool_name
+        if chunk.tool_call_id:
+            index_state["tool_call_id"] = chunk.tool_call_id
+            self.tool_call_stream_states[chunk.tool_call_id] = index_state
+
+        tool_call_id = index_state.get("tool_call_id")
+        if not tool_call_id:
+            if chunk.arguments_delta:
+                index_state["pending_args"].append(chunk.arguments_delta)
+            return
+
+        if not index_state.get("started"):
+            await self._emit_tool_call_start(
+                tool_call_id=tool_call_id,
+                tool_name=index_state.get("tool_name", "") or "",
+            )
+            index_state["started"] = True
+
+        pending_args = index_state.get("pending_args") or []
+        for pending_delta in pending_args:
+            await self._emit_tool_call_args(tool_call_id=tool_call_id, delta=pending_delta)
+            index_state["args_emitted"] = True
+        index_state["pending_args"] = []
+
+        if chunk.arguments_delta:
+            await self._emit_tool_call_args(tool_call_id=tool_call_id, delta=chunk.arguments_delta)
+            index_state["args_emitted"] = True
+
     async def on_agent_step(self, step: AgentStep):
-        if step.thought:
-            await self._emit("reasoning.delta", {"delta": step.thought})
-        await self._emit("tool.delta", {
-            "tool": step.action.function['name'],
-            "delta": step.observation,
-            "tool_call_id": step.action.id,
-        })
-        await self._emit("tool.finished", {
-            "tool": step.action.function['name'],
-            "output": step.observation,
-            "tool_call_id": step.action.id,
-        })
+        if step.thought and self.session_manager:
+            self.session_manager.buffer_message(
+                role=MessageRole.REASONING,
+                text_content=step.thought,
+                reasoning_content=step.thought,
+                activity_type="tool_call_thought",
+            )
+
+        output_text = (
+            step.observation
+            if isinstance(step.observation, str)
+            else json.dumps(step.observation, ensure_ascii=False)
+        )
+        await self._emit(
+            ToolCallResultEvent(
+                type=EventType.TOOL_CALL_RESULT,
+                message_id=self.assistant_message_id,
+                tool_call_id=step.action.id,
+                content=output_text,
+                role="tool",
+            )
+        )
         if self.session_manager:
             self.session_manager.buffer_message(
                 role=MessageRole.TOOL,
                 tool_call_id=step.action.id,
-                content=json.dumps(step.observation, ensure_ascii=False)
+                text_content=output_text,
             )
 
     async def on_final_chunk_generated(self, chunk: str):
-        # 仅用于前端流式展示
-        await self._emit("message.delta", {"delta": chunk})
+        if not chunk:
+            return
+        if not self.text_started:
+            self.text_started = True
+            await self._emit(
+                TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=self.assistant_message_id,
+                    role="assistant",
+                )
+            )
+        await self._emit(
+            TextMessageContentEvent(
+                type=EventType.TEXT_MESSAGE_CONTENT,
+                message_id=self.assistant_message_id,
+                delta=chunk,
+            )
+        )
 
     async def on_reasoning_chunk_generated(self, chunk: str):
-        if chunk:
-            self.reasoning_chunks.append(chunk)
-        await self._emit("reasoning.delta", {"delta": chunk})
+        if not chunk:
+            return
+        if not self.reasoning_started:
+            self.reasoning_started = True
+            await self._emit(
+                ReasoningStartEvent(
+                    type=EventType.REASONING_START,
+                    message_id=self.reasoning_message_id,
+                )
+            )
+            await self._emit(
+                ReasoningMessageStartEvent(
+                    type=EventType.REASONING_MESSAGE_START,
+                    message_id=self.reasoning_message_id,
+                    role="assistant",
+                )
+            )
+        await self._emit(
+            ReasoningMessageContentEvent(
+                type=EventType.REASONING_MESSAGE_CONTENT,
+                message_id=self.reasoning_message_id,
+                delta=chunk,
+            )
+        )
 
-    def _assistant_meta(self) -> Optional[Dict[str, Any]]:
-        if not self.reasoning_chunks:
-            return None
-        return {
-            "reasoning": {
-                "plaintext": "".join(self.reasoning_chunks)
-            }
-        }
+    @staticmethod
+    def _to_interrupt_payload(client_tool_calls: List[AgentClientToolCall]) -> AgUiInterruptPayload:
+        tool_calls: List[AgUiInterruptToolCall] = []
+        for call in client_tool_calls:
+            tool_calls.append(
+                AgUiInterruptToolCall(
+                    toolCallId=call.tool_call_id,
+                    name=call.name,
+                    arguments=call.arguments,
+                )
+            )
+        return AgUiInterruptPayload(toolCalls=tool_calls)
+
+    async def _persist_assistant(self, result: AgentResult):
+        if not self.session_manager:
+            return
+        text_content = result.message.content if isinstance(result.message.content, str) else None
+        content_parts = result.message.content if isinstance(result.message.content, list) else None
+        reasoning_content = result.reasoning_content
+        if not text_content and not content_parts and not reasoning_content:
+            return
+        self.session_manager.buffer_message(
+            role=MessageRole.ASSISTANT,
+            text_content=text_content,
+            content_parts=content_parts,
+            reasoning_content=reasoning_content,
+        )
 
     async def on_agent_finish(self, result: AgentResult):
         self.final_result = result
-        if not self.has_terminal_event:
-            self.has_terminal_event = True
-            await self._emit("done", {
-                "status": "completed",
-                "result": result.model_dump(),
-            })
-        # Buffer final message
-        if self.session_manager and result.message.content:
-            self.session_manager.buffer_message(
-                role=MessageRole.ASSISTANT,
-                content=result.message.content,
-                meta=self._assistant_meta(),
+        if self.has_terminal_event:
+            return
+        self.has_terminal_event = True
+        await self._close_open_messages()
+        await self._persist_assistant(result)
+        if self.run_input:
+            await self._emit(
+                RunFinishedEventExt(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=self.run_input.thread_id,
+                    run_id=self.run_input.run_id,
+                    outcome="success",
+                    result=result.model_dump(mode="json"),
+                )
+            )
+            await self._emit(
+                StateDeltaEvent(
+                    type=EventType.STATE_DELTA,
+                    delta=[{"op": "replace", "path": "/runStatus", "value": "completed"}],
+                )
             )
 
     async def on_agent_interrupt(self, result: AgentResult):
@@ -164,59 +460,87 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if self.has_terminal_event:
             return
         self.has_terminal_event = True
-        pending_calls = [tc.model_dump(mode="json") for tc in (result.pending_tool_calls or [])]
-        await self._emit("done", {
-            "status": "interrupt",
-            "interrupt": {
-                "id": f"interrupt-{self.trace_id}",
-                "reason": "tool_result_required",
-                "payload": {
-                    "tool_calls": pending_calls,
-                },
-            },
-            "result": result.model_dump(),
-        })
-        if self.session_manager and result.message.content:
-            self.session_manager.buffer_message(
-                role=MessageRole.ASSISTANT,
-                content=result.message.content,
-                meta=self._assistant_meta(),
+        await self._close_open_messages()
+        await self._persist_assistant(result)
+        if self.run_input:
+            await self._emit(
+                RunFinishedEventExt(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=self.run_input.thread_id,
+                    run_id=self.run_input.run_id,
+                    outcome="interrupt",
+                    interrupt=AgUiInterrupt(
+                        id=f"interrupt-{self.trace_id}",
+                        reason="tool_result_required",
+                        payload=self._to_interrupt_payload(result.client_tool_calls or []),
+                    ),
+                    result=result.model_dump(mode="json"),
+                )
+            )
+            await self._emit(
+                StateDeltaEvent(
+                    type=EventType.STATE_DELTA,
+                    delta=[{"op": "replace", "path": "/runStatus", "value": "interrupted"}],
+                )
             )
 
     async def on_agent_cancel(self, result: AgentResult) -> None:
-        # [新] 现在引擎发送任何错误(不只是asyncio.CancelledError)都会发送on_agent_cancel事件并包含已生成内容和总用量，用量抢救现在由引擎负责兜底
         self.final_result = result
-        # 通知前端
-        if not self.has_terminal_event:
-            self.has_terminal_event = True
-            await self._emit("done", {
-                "status": "cancelled",
-                "result": result.model_dump(),
-            })
-        # Buffer final message
-        if self.session_manager and result.message.content:
-            self.session_manager.buffer_message(
-                role=MessageRole.ASSISTANT,
-                content=result.message.content,
-                meta=self._assistant_meta(),
+        if self.has_terminal_event:
+            return
+        self.has_terminal_event = True
+        await self._close_open_messages()
+        await self._persist_assistant(result)
+        if self.run_input:
+            await self._emit(
+                RunFinishedEventExt(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=self.run_input.thread_id,
+                    run_id=self.run_input.run_id,
+                    outcome="cancelled",
+                    result=result.model_dump(mode="json"),
+                )
+            )
+            await self._emit(
+                StateDeltaEvent(
+                    type=EventType.STATE_DELTA,
+                    delta=[{"op": "replace", "path": "/runStatus", "value": "cancelled"}],
+                )
             )
 
     async def on_agent_error(self, error: Exception):
         if self.has_terminal_event:
             return
         self.has_terminal_event = True
-        await self._emit("error", {
-            "code": "AGENT_EXECUTION_ERROR",
-            "message": str(error),
-            "retriable": False,
-        })
+        await self._close_open_messages()
+        if self.run_input:
+            await self._emit(
+                RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    thread_id=self.run_input.thread_id,
+                    run_id=self.run_input.run_id,
+                    code="AGENT_EXECUTION_ERROR",
+                    message=str(error),
+                    retriable=False,
+                )
+            )
+            await self._emit(
+                StateDeltaEvent(
+                    type=EventType.STATE_DELTA,
+                    delta=[{"op": "replace", "path": "/runStatus", "value": "error"}],
+                )
+            )
 
     async def on_usage(self, usage: LLMUsage):
-        # [Billing Core] 计费的核心驱动力
-        # 每次 LLM 调用（Prompt/Completion）都会触发此回调
         if self.usage_accumulator:
             self.usage_accumulator.add(usage)
-        await self._emit("usage", usage.model_dump())
+        await self._emit_custom(
+            "ps.meta.usage",
+            {
+                **self._base_meta(),
+                **usage.model_dump(mode="json"),
+            },
+        )
 
 @register_service
 class AgentService(ResourceImplementationService):
@@ -233,74 +557,73 @@ class AgentService(ResourceImplementationService):
         self.agent_memory_var_service = AgentMemoryVarService(context)
         self.long_term_service = LongTermContextService(context)
         self.prompt_template = PromptTemplate()
+        self.ag_ui_normalizer = AgUiNormalizer()
+        self.ag_ui_processor = AgUiProcessor(self.ag_ui_normalizer)
         self.resource_resolver = BaseResourceService(context)
 
     # ==========================================================================
     # Execution Logic (The Core)
     # ==========================================================================
 
+    @staticmethod
+    def _event_to_payload(event: Any) -> Dict[str, Any]:
+        if hasattr(event, "model_dump"):
+            return event.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if isinstance(event, dict):
+            return event
+        return {"type": "CUSTOM", "name": "ps.meta.unknown_event", "value": str(event)}
+
     async def execute(
         self, 
         instance_uuid: str, 
-        execute_params: AgentExecutionRequest, 
+        run_input: RunAgentInputExt,
         actor: User,
         runtime_workspace: Optional[Workspace] = None
-    ) -> AgentExecutionResponse:
-        """
-        [Wrapper] 同步执行入口，消费 Generator 直至结束。
-        """
-        agent_result: Optional[AgentResult] = None
-        trace_id = None
-        session_uuid = None
-
-        try:
-            result = await self.async_execute(
-                instance_uuid=instance_uuid, 
-                execute_params=execute_params, 
-                actor=actor, 
-                runtime_workspace=runtime_workspace
-            )
-            generator = result.generator
-            async for event in generator:
-                if event.event == "message.delta":
-                    session_uuid = event.data.get("session_uuid")
-                    trace_id = event.data.get("trace_id")
-                elif event.event == "done":
-                    done_result = event.data.get("result")
-                    if isinstance(done_result, dict):
-                        agent_result = done_result
-                elif event.event == "error":
-                    logger.error(f"Agent stream error: {event.data}")
-                    # 在非流式模式下，遇到错误应抛出，以便上层捕获
-                    raise ServiceException(f"Agent execution error: {event.data}")
-        except Exception as e:
-            logger.error(f"Critical agent execution failure: {e}", exc_info=True)
-            raise ServiceException(f"Agent execution failed: {str(e)}")
-
-        result_data = AgentExecutionResponseData(
-            agent_result=agent_result,
-            session_uuid=session_uuid,
-            trace_id=trace_id
+    ) -> RunEventsResponse:
+        stream_result = await self.async_execute(
+            instance_uuid=instance_uuid,
+            run_input=run_input,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
         )
 
-        return AgentExecutionResponse(
-            data=result_data
+        events: List[Dict[str, Any]] = []
+        try:
+            async for event in stream_result.generator:
+                events.append(self._event_to_payload(event))
+        except Exception as exc:
+            logger.error("Critical non-stream execution failure: %s", exc, exc_info=True)
+            events.append(
+                {
+                    "type": "RUN_ERROR",
+                    "threadId": run_input.thread_id,
+                    "runId": run_input.run_id,
+                    "code": "AGENT_RUNTIME_ERROR",
+                    "message": str(exc),
+                    "retriable": False,
+                }
+            )
+
+        return RunEventsResponse(
+            threadId=run_input.thread_id,
+            runId=run_input.run_id,
+            events=events,
         )
 
     async def execute_batch(
         self,
         instance_uuids: List[str],
-        execute_params: AgentExecutionRequest,
+        run_input: RunAgentInputExt,
         actor: User,
         runtime_workspace: Optional[Workspace] = None
-    ) -> List[AgentExecutionResponse]:
+    ) -> List[RunEventsResponse]:
         """
         Agent 暂不支持真正的并行 Batch（每个都是独立的有状态循环）。
         简单实现为循环调用。
         """
         results = []
         for uuid in instance_uuids:
-            res = await self.execute(uuid, execute_params, actor, runtime_workspace)
+            res = await self.execute(uuid, run_input, actor, runtime_workspace)
             results.append(res)
         
         return results
@@ -308,7 +631,7 @@ class AgentService(ResourceImplementationService):
     async def async_execute(
         self, 
         instance_uuid: str, 
-        execute_params: AgentExecutionRequest, 
+        run_input: RunAgentInputExt,
         actor: User,
         runtime_workspace: Optional[Workspace] = None
     ) -> AgentRunResult:
@@ -325,23 +648,24 @@ class AgentService(ResourceImplementationService):
         except Exception as e:
             raise ConfigurationError(f"Agent {instance.uuid} config invalid: {e}")
 
-        # 3. Inputs
-        inputs = execute_params.inputs
-        if not inputs.input_query and not inputs.history:
-            raise ServiceException("Agent input query is required.")
+        # 3. AG-UI input normalization
+        processed = self.ag_ui_processor.agui_to_agent_runtime(run_input)
+        if not processed.input_content and not processed.history:
+            raise ServiceException("Agent input content is required.")
 
-        ag_ui_meta = {}
-        if execute_params.meta and isinstance(execute_params.meta, dict):
-            ag_ui_meta = execute_params.meta.get("ag_ui", {}) or {}
-        ag_ui_tools_raw = ag_ui_meta.get("tools", []) if isinstance(ag_ui_meta, dict) else []
-            
         generator_manager = AsyncGeneratorManager()
         dependencies = await self.ref_dao.get_dependencies(instance.id)
 
         # 4. Session Manager
         trace_id = str(uuid.uuid4())
         session_manager = AgentSessionManager(
-            self.context, inputs.session_uuid, trace_id, instance, workspace, actor
+            self.context,
+            processed.session_uuid,
+            trace_id,
+            instance,
+            workspace,
+            actor,
+            create_if_missing=True,
         )
         await session_manager.initialize()
         session = session_manager.session
@@ -354,24 +678,14 @@ class AgentService(ResourceImplementationService):
 
         # 7. Pipeline Manager
         system_message = LLMMessage(role="system", content=rendered_system_prompt)
-        history = inputs.history if not session else None
-        user_message = LLMMessage(role="user", content=inputs.input_query)
+        history_messages = processed.history if not session else None
+        user_message = LLMMessage(role="user", content=processed.input_content)
         tool_executor = ResourceAwareToolExecutor(self.context, workspace)
 
         # AG-UI client-side tools are first-class tools in the run config,
         # but their execution happens on the client and is resumed via interrupt flow.
-        for tool_item in ag_ui_tools_raw:
+        for tool_def in processed.llm_tools:
             try:
-                if not isinstance(tool_item, dict):
-                    continue
-                tool_def = LLMTool(
-                    type="function",
-                    function=LLMToolFunction(
-                        name=tool_item["name"],
-                        description=tool_item.get("description", ""),
-                        parameters=tool_item.get("parameters", {"type": "object", "properties": {}}),
-                    ),
-                )
                 tool_executor.register_client_tool(tool_def)
             except Exception as e:
                 logger.warning(f"Invalid AG-UI tool definition ignored: {e}")
@@ -379,7 +693,7 @@ class AgentService(ResourceImplementationService):
         pipeline_manager = AgentPipelineManager(
             system_message=system_message,
             user_message=user_message,
-            history=history,
+            history=history_messages,
             tool_executor=tool_executor
         ).add_standard_processors(
             app_context=self.context, 
@@ -401,20 +715,22 @@ class AgentService(ResourceImplementationService):
         )
 
         # 10. Launch Task
-        asyncio.create_task(self._run_agent_background_task(
+        run_task = asyncio.create_task(self._run_agent_background_task(
             agent_config=agent_config,
             llm_module_version=instance.llm_module_version,
             pipeline_manager=pipeline_manager,
             runtime_workspace=workspace,
             trace_manager=trace_manager,
             generator_manager=generator_manager,
-            session_manager=session_manager
+            session_manager=session_manager,
+            run_input=run_input,
         ))
 
         return AgentRunResult(
             generator=generator_manager,
             config=agent_config,
-            trace_id=trace_id
+            trace_id=trace_id,
+            cancel=lambda: (not run_task.done()) and run_task.cancel(),
         )
 
     @asynccontextmanager
@@ -446,7 +762,8 @@ class AgentService(ResourceImplementationService):
         runtime_workspace: Workspace,
         trace_manager: TraceManager,
         generator_manager: AsyncGeneratorManager,
-        session_manager: Optional[AgentSessionManager] = None
+        session_manager: Optional[AgentSessionManager] = None,
+        run_input: Optional[RunAgentInputExt] = None,
     ):
 
         callbacks: Optional[PersistingAgentCallbacks] = None
@@ -457,7 +774,8 @@ class AgentService(ResourceImplementationService):
                 generator_manager=generator_manager,
                 session_manager=session_manager,
                 trace_id=trace_manager.force_trace_id,
-                usage_accumulator=usage_accumulator
+                usage_accumulator=usage_accumulator,
+                run_input=run_input,
             )
 
             # A. Pipeline Execution
@@ -491,7 +809,11 @@ class AgentService(ResourceImplementationService):
             if session:
                 # Buffer user input
                 user_message = pipeline_manager.user_message
-                session_manager.buffer_message(role=MessageRole.USER, content=user_message.content)
+                session_manager.buffer_message(
+                    role=MessageRole.USER,
+                    text_content=user_message.content if isinstance(user_message.content, str) else None,
+                    content_parts=user_message.content if isinstance(user_message.content, list) else None,
+                )
 
             async with lock_ctx:
                 # [TRACE SCOPE START]
@@ -535,15 +857,7 @@ class AgentService(ResourceImplementationService):
         except Exception as e:
             logger.error(f"Agent task error: {e}", exc_info=True)
             if callbacks and not callbacks.has_terminal_event:
-                callbacks.has_terminal_event = True
-                await generator_manager.put(AgentEvent(event="error", data={
-                    "trace_id": trace_manager.force_trace_id,
-                    "turn_id": trace_manager.force_trace_id,
-                    "ts": int(time.time() * 1000),
-                    "code": "AGENT_RUNTIME_ERROR",
-                    "message": str(e),
-                    "retriable": False,
-                }))
+                await callbacks.on_agent_error(e)
         finally:
             await generator_manager.aclose(force=False)
 

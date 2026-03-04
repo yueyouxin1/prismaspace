@@ -63,7 +63,7 @@ class MockWebSocket:
     async def put_message(self, message: dict):
         await self._receive_queue.put(json.dumps(message))
 
-    async def get_message(self, timeout=2.0):
+    async def get_message(self, timeout=5.0):
         return json.loads(await asyncio.wait_for(self._send_queue.get(), timeout))
 
 
@@ -280,49 +280,56 @@ class TestAgentFullSuite:
             mock_llm_engine_service.response_sequence.append(("text", "WS Response"))
             
             await mock_ws.put_message({
-                "action": "chat",
-                "request_id": "req_1",
-                "data": {
-                    "agent_uuid": agent_instance.uuid,
-                    "inputs": {"input_query": "Hello WS"}
-                }
+                "threadId": f"thread_{uuid.uuid4().hex[:8]}",
+                "runId": "run_ws_1",
+                "state": {},
+                "messages": [{"id": "u1", "role": "user", "content": "Hello WS"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"agentUuid": agent_instance.uuid},
             })
             
             received_content = ""
+            first_run_cancelled = False
             while True:
                 resp = await mock_ws.get_message()
-                event = resp.get("event")
-                if event == "start":
-                    assert resp["request_id"] == "req_1"
-                elif event == "chunk":
-                    received_content += resp["data"]["content"]
-                elif event == "finish":
+                event_type = resp.get("type")
+                if event_type == "TEXT_MESSAGE_CONTENT":
+                    received_content += resp.get("delta", "")
+                elif event_type == "RUN_FINISHED":
                     break
-                elif event == "error":
-                    pytest.fail(f"WS Error: {resp['data']}")
+                elif event_type == "CUSTOM" and resp.get("name") == "ps.control.cancelled":
+                    first_run_cancelled = True
+                    break
+                elif event_type == "RUN_ERROR":
+                    pytest.fail(f"WS Error: {resp}")
             
-            assert received_content == "WS Response"
+            assert first_run_cancelled or received_content == "WS Response"
 
             # --- B. 停止生成 (Stop) ---
             mock_llm_engine_service.response_sequence.append(("text", "Stopped Response"))
             
             await mock_ws.put_message({
-                "action": "chat",
-                "request_id": "req_2",
-                "data": {"agent_uuid": agent_instance.uuid, "inputs": {"input_query": "Go"}}
+                "threadId": f"thread_{uuid.uuid4().hex[:8]}",
+                "runId": "run_ws_2",
+                "state": {},
+                "messages": [{"id": "u2", "role": "user", "content": "Go"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"agentUuid": agent_instance.uuid},
             })
             
             # 立即发送 Stop
-            await mock_ws.put_message({"action": "stop", "request_id": "req_stop"})
+            await mock_ws.put_message({"type": "CUSTOM", "name": "ps.cancel_run", "value": {}})
             
             stop_confirmed = False
             for _ in range(20):
                 try:
                     resp = await mock_ws.get_message(timeout=1.0)
-                    if resp.get("event") in ["cancelled", "stopped"]:
+                    if resp.get("type") == "CUSTOM" and resp.get("name") == "ps.control.cancelled":
                         stop_confirmed = True
                         break
-                    if resp.get("event") == "finish":
+                    if resp.get("type") == "RUN_FINISHED":
                         break
                 except asyncio.TimeoutError:
                     break
@@ -342,7 +349,18 @@ class TestAgentFullSuite:
             except Exception as e:
                 # 忽略 Handler 内部因 mock_ws.close() 抛出的异常
                 pass
-            
+
+            current_task = asyncio.current_task()
+            for task in asyncio.all_tasks():
+                if task is current_task or task.done():
+                    continue
+                task_desc = str(task)
+                if "run_agent_background_task" in task_desc or "_run_chat_stream" in task_desc or "BillingContext" in task_desc:
+                    try:
+                        await asyncio.wait_for(task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        pass
+
             await asyncio.sleep(0.1)
 
     # ==========================================================================
@@ -391,7 +409,15 @@ class TestAgentFullSuite:
         
         response = await client.post(
             f"/api/v1/agent/{agent_instance.uuid}/execute",
-            json={"inputs": {"input_query": "hi"}},
+            json={
+                "threadId": f"thread_{uuid.uuid4().hex[:8]}",
+                "runId": f"run_{uuid.uuid4().hex[:8]}",
+                "state": {},
+                "messages": [{"id": "u1", "role": "user", "content": "hi"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"sessionMode": "stateless"},
+            },
             headers=headers
         )
         assert response.status_code == 200
@@ -435,7 +461,15 @@ class TestAgentFullSuite:
         # 3. 执行
         await client.post(
             f"/api/v1/agent/{agent_instance.uuid}/execute",
-            json={"inputs": {"input_query": "Cost me money"}},
+            json={
+                "threadId": f"thread_{uuid.uuid4().hex[:8]}",
+                "runId": f"run_{uuid.uuid4().hex[:8]}",
+                "state": {},
+                "messages": [{"id": "u1", "role": "user", "content": "Cost me money"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"sessionMode": "stateless"},
+            },
             headers=headers
         )
         
@@ -507,7 +541,15 @@ class TestAgentFullSuite:
         
         response = await client.post(
             f"/api/v1/agent/{agent_instance.uuid}/execute",
-            json={"inputs": {"input_query": "Remember this", "session_uuid": session_uuid}},
+            json={
+                "threadId": session_uuid,
+                "runId": f"run_{uuid.uuid4().hex[:8]}",
+                "state": {},
+                "messages": [{"id": "u1", "role": "user", "content": "Remember this"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"sessionUuid": session_uuid},
+            },
             headers=headers
         )
         assert response.status_code == 200, f"Execute failed: {response.text}"

@@ -14,6 +14,7 @@ from app.models.resource.agent.agent_memory import SummaryScope
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 from app.schemas.resource.agent.agent_memory_schemas import AgentContextSummaryRead
 from app.services.module.service_module_service import ServiceModuleService
+from app.services.resource.agent.message_content import chat_message_to_text
 from app.engine.model.llm import (
     LLMRunConfig, 
     LLMMessage, 
@@ -125,7 +126,7 @@ class ContextSummaryService(BaseService):
         buffer = []
         for msg in messages:
             role = msg.role.value.capitalize()
-            content = msg.content or ""
+            content = chat_message_to_text(msg)
             
             # 简化 Tool Output，避免过多干扰摘要
             if msg.role == MessageRole.TOOL:

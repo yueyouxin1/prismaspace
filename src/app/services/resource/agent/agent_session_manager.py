@@ -32,13 +32,15 @@ class AgentSessionManager:
         agent_instance: Agent,
         # 显式传入运行时工作空间ID，用于计费归属
         runtime_workspace: Workspace,
-        actor: User
+        actor: User,
+        create_if_missing: bool = False,
     ):
         self.context = context
         self.actor = actor
         self.agent_instance = agent_instance
         self.runtime_workspace = runtime_workspace
         self.session_uuid = session_uuid
+        self.create_if_missing = create_if_missing
         
         # 依赖服务
         self.session_service = SessionService(context)
@@ -51,17 +53,29 @@ class AgentSessionManager:
     async def initialize(self):
         """加载或创建会话"""
         if self.session_uuid:
-            self.session = await self.session_service.get_session(self.session_uuid, self.actor)
-            if not self.session:
-                raise NotFoundError(f"Agent Session Not Found.")
+            if self.create_if_missing:
+                self.session = await self.session_service.get_or_create_session(
+                    session_uuid=self.session_uuid,
+                    agent_instance=self.agent_instance,
+                    actor=self.actor,
+                )
+            else:
+                self.session = await self.session_service.get_session(self.session_uuid, self.actor)
+                if not self.session:
+                    raise NotFoundError("Agent Session Not Found.")
             if self.session and self.agent_instance.id != self.session.agent_instance_id:
                 self.session = None
-                raise ServiceException(f"Agent Session Initialize Error.")
+                raise ServiceException("Agent Session Initialize Error.")
 
     def buffer_message(
         self, 
         role: MessageRole, 
-        content: str = None, 
+        text_content: Optional[str] = None,
+        content_parts: Optional[List[Dict[str, Any]]] = None,
+        reasoning_content: Optional[str] = None,
+        activity_type: Optional[str] = None,
+        encrypted_value: Optional[str] = None,
+        content: str = None,
         tool_calls: List[Dict] = None, 
         tool_call_id: str = None,
         token_count: int = 0,
@@ -75,7 +89,12 @@ class AgentSessionManager:
         """
         self.message_buffer.append({
             "role": role,
-            "content": content,
+            "text_content": text_content if text_content is not None else content,
+            "content_parts": content_parts,
+            "reasoning_content": reasoning_content,
+            "activity_type": activity_type,
+            "encrypted_value": encrypted_value,
+            "content": text_content if text_content is not None else content,
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
             "token_count": token_count,

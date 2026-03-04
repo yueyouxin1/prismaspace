@@ -8,9 +8,12 @@ import enum
 
 class MessageRole(str, enum.Enum):
     SYSTEM = "system"
+    DEVELOPER = "developer"
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
+    ACTIVITY = "activity"
+    REASONING = "reasoning"
 
 class ChatSession(Base):
     """
@@ -58,6 +61,11 @@ class ChatMessage(Base):
     # 核心内容
     role = Column(Enum(MessageRole), nullable=False)
     content = Column(Text, nullable=True) # Tool Call 的 content 可能为空
+    text_content = Column(Text, nullable=True, comment="结构化文本内容（主字段）")
+    content_parts = Column(JSON, nullable=True, comment="多模态内容分片（AG-UI content parts）")
+    reasoning_content = Column(Text, nullable=True, comment="结构化思考内容（明文）")
+    activity_type = Column(String(64), nullable=True, comment="activity 消息类型")
+    encrypted_value = Column(Text, nullable=True, comment="加密思考值（用于跨轮连续性）")
     
     # [增强] 多模态与元数据支持 (对齐原型 media 字段)
     # 结构: { "images": ["url..."], "files": [{"name": "x.pdf", "id": "..."}], "client_info": {...} }

@@ -1,6 +1,7 @@
 # src/app/services/resource/agent/types/agent.py
 
 from dataclasses import dataclass
+from typing import Callable, Optional
 from app.utils.async_generator import AsyncGeneratorManager 
 from app.schemas.resource.agent.agent_schemas import AgentConfig
 
@@ -15,3 +16,4 @@ class AgentRunResult:
     generator: AsyncGeneratorManager 
     config: AgentConfig
     trace_id: str
+    cancel: Optional[Callable[[], None]] = None

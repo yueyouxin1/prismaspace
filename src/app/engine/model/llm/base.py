@@ -27,7 +27,7 @@ class LLMTool(BaseModel):
 
 class LLMMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    content: Optional[str] = None
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None # 模型生成的 tool_calls
     tool_call_id: Optional[str] = None # role='tool' 时需要
 
@@ -65,6 +65,14 @@ class LLMToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
     function: Dict[str, str] # e.g., {"name": "get_weather", "arguments": '{"location": "beijing"}'}
+
+
+class LLMToolCallChunk(BaseModel):
+    """流式工具调用增量片段。"""
+    index: int
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    arguments_delta: Optional[str] = None
 
 class LLMResult(BaseModel):
     """标准化的最终返回结果"""
@@ -117,6 +125,10 @@ class LLMEngineCallbacks(ABC):
 
     async def on_reasoning_chunk(self, chunk: str) -> None:
         """可选回调：当模型返回思考内容时调用。"""
+        return None
+
+    async def on_tool_call_chunk(self, chunk: LLMToolCallChunk) -> None:
+        """可选回调：当模型流式返回工具调用参数增量时调用。"""
         return None
     
     @abstractmethod

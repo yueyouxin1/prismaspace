@@ -106,6 +106,32 @@ class SessionService(BaseService):
             raise ServiceException("This session has been archived.")
         return session
 
+    async def get_or_create_session(
+        self,
+        session_uuid: str,
+        agent_instance: ResourceInstance,
+        actor: User,
+    ) -> ChatSession:
+        session = await self.session_dao.get_by_uuid(session_uuid)
+        if session:
+            if session.user_id != actor.id:
+                raise PermissionDeniedError("Access denied to this session")
+            if session.is_archived:
+                raise ServiceException("This session has been archived.")
+            if session.agent_instance_id != agent_instance.id:
+                raise ServiceException("Session bound to another agent instance.")
+            return session
+
+        created = ChatSession(
+            uuid=session_uuid,
+            user_id=actor.id,
+            agent_instance_id=agent_instance.id,
+            title="New Chat",
+        )
+        await self.session_dao.add(created)
+        await self.db.flush()
+        return created
+
     async def get_session_history(self, session_uuid: str, cursor: int, limit: int, actor: User) -> List[ChatMessageRead]:
         """获取会话的消息历史 (用于前端展示)"""
         session = await self.get_session(session_uuid, actor)
@@ -116,7 +142,12 @@ class SessionService(BaseService):
         self, 
         session: ChatSession, 
         role: MessageRole, 
-        content: str = None, 
+        text_content: str = None,
+        content_parts: Optional[List[Dict[str, Any]]] = None,
+        reasoning_content: Optional[str] = None,
+        activity_type: Optional[str] = None,
+        encrypted_value: Optional[str] = None,
+        content: str = None,
         tool_calls: List[Dict[str, Any]] = None, 
         tool_call_id: str = None,
         trace_id: str = None,
@@ -129,7 +160,12 @@ class SessionService(BaseService):
         msg = ChatMessage(
             session_id=session.id,
             role=role,
-            content=content,
+            content=text_content if text_content is not None else content,
+            text_content=text_content if text_content is not None else content,
+            content_parts=content_parts,
+            reasoning_content=reasoning_content,
+            activity_type=activity_type,
+            encrypted_value=encrypted_value,
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,
             token_count=token_count,
@@ -162,7 +198,12 @@ class SessionService(BaseService):
                 msg = ChatMessage(
                     session_id=session.id,
                     role=data['role'],
-                    content=data.get('content'),
+                    content=data.get('text_content') if data.get('text_content') is not None else data.get('content'),
+                    text_content=data.get('text_content') if data.get('text_content') is not None else data.get('content'),
+                    content_parts=data.get('content_parts'),
+                    reasoning_content=data.get('reasoning_content'),
+                    activity_type=data.get('activity_type'),
+                    encrypted_value=data.get('encrypted_value'),
                     tool_calls=data.get('tool_calls'),
                     tool_call_id=data.get('tool_call_id'),
                     token_count=data.get('token_count', 0),

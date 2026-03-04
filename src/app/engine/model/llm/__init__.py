@@ -8,6 +8,7 @@ from .base import (
     LLMTool,
     LLMUsage,
     LLMToolCall,
+    LLMToolCallChunk,
     LLMResult,
     LLMEngineCallbacks,
     LLMEngineError,

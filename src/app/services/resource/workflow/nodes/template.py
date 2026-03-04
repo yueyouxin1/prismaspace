@@ -1,11 +1,11 @@
 # app/services/resource/workflow/nodes/template.py
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import Field, ConfigDict
 from app.engine.workflow.definitions import WorkflowNode, NodeData, BaseNodeConfig, ExecutionPolicy, NodeTemplate, NodeCategory
 from app.engine.schemas.parameter_schema import ParameterSchema 
 from app.engine.schemas.form_schema import FormProperty
 from app.engine.model.llm import LLMMessage
-from app.schemas.resource.agent.agent_schemas import AgentSchema, AgentExecutionInputs
+from app.schemas.resource.agent.agent_schemas import AgentSchema
 
 class ResourceNodeConfig(BaseNodeConfig):
     resource_instance_uuid: str = Field(...)
@@ -67,7 +67,12 @@ LLM_TEMPLATE = NodeTemplate(
 # 2. Agent Node Template
 # ============================================================================
 # Agent Node采取无状态对话
-class AgentNodeConfig(ResourceNodeConfig, AgentExecutionInputs):
+class AgentNodeConfig(ResourceNodeConfig):
+    input_query: str = Field(default="", description="用户输入")
+    input_content_parts: Optional[List[Dict[str, Any]]] = Field(default=None, description="多模态输入")
+    history: Optional[List[LLMMessage]] = Field(default=None, description="可选历史上下文")
+    session_uuid: Optional[str] = Field(default=None, description="会话ID（可选）")
+    enable_session: Optional[bool] = Field(default=None, description="是否启用持久会话")
     model_config = ConfigDict(extra="forbid")
 
 AGENT_TEMPLATE = NodeTemplate(

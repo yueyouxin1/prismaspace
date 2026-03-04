@@ -129,7 +129,7 @@ class MyAgentCallbacks(AgentEngineCallbacks):
 
     async def on_agent_interrupt(self, result: AgentResult) -> None:
         print("\n\n--- Agent Interrupted ---")
-        print(f"Pending Tool Calls: {len(result.pending_tool_calls)}")
+        print(f"Client Tool Calls: {len(result.client_tool_calls)}")
         print("--------------------------")
 
     async def on_agent_cancel(self, result: AgentResult) -> None:

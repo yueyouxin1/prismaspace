@@ -4,13 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1.agent import agent_api
-from app.schemas.protocol import AgUiRunAgentInput
-from app.schemas.resource.agent.agent_schemas import AgentEvent
+from app.schemas.protocol import RunAgentInputExt
 from app.services.exceptions import ServiceException
 
 
 def _build_run_input():
-    return AgUiRunAgentInput.model_validate(
+    return RunAgentInputExt.model_validate(
         {
             "threadId": "thread-x",
             "runId": "run-x",
@@ -38,8 +37,11 @@ async def test_stream_agent_route_outputs_ag_ui_sse(monkeypatch):
 
         async def async_execute(self, instance_uuid, request, actor):
             async def _gen():
-                yield AgentEvent(event="message.delta", data={"delta": "hello"})
-                yield AgentEvent(event="done", data={"status": "completed", "result": {"ok": True}})
+                yield {"type": "RUN_STARTED", "threadId": "thread-x", "runId": "run-x"}
+                yield {"type": "TEXT_MESSAGE_START", "messageId": "assistant-run-x", "role": "assistant"}
+                yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "assistant-run-x", "delta": "hello"}
+                yield {"type": "TEXT_MESSAGE_END", "messageId": "assistant-run-x"}
+                yield {"type": "RUN_FINISHED", "threadId": "thread-x", "runId": "run-x", "outcome": "success", "result": {"ok": True}}
 
             return SimpleNamespace(generator=_gen())
 
@@ -60,6 +62,33 @@ async def test_stream_agent_route_outputs_ag_ui_sse(monkeypatch):
     assert types[0] == "RUN_STARTED"
     assert "TEXT_MESSAGE_CONTENT" in types
     assert "RUN_FINISHED" in types
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_route_outputs_ag_ui_events(monkeypatch):
+    class _FakeAgentService:
+        def __init__(self, context):
+            self.context = context
+
+        async def execute(self, instance_uuid, run_input, actor):
+            return SimpleNamespace(
+                thread_id=run_input.thread_id,
+                run_id=run_input.run_id,
+                events=[
+                    {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id},
+                    {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id, "outcome": "success"},
+                ],
+            )
+
+    monkeypatch.setattr(agent_api, "AgentService", _FakeAgentService)
+
+    request = _build_run_input()
+    context = SimpleNamespace(actor=SimpleNamespace())
+    response = await agent_api.execute_agent("agent-1", request, context)
+
+    assert response.data.thread_id == "thread-x"
+    assert response.data.run_id == "run-x"
+    assert [item["type"] for item in response.data.events] == ["RUN_STARTED", "RUN_FINISHED"]
 
 
 @pytest.mark.asyncio
