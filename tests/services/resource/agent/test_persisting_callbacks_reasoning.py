@@ -250,3 +250,104 @@ async def test_tool_call_chunk_stream_emits_incremental_args_and_no_duplicate_fu
     ]
     assert payloads[1]["delta"] == '{"question":"go'
     assert payloads[2]["delta"] == '?"}'
+
+
+@pytest.mark.asyncio
+async def test_agent_step_emits_step_started_and_finished_events():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+    )
+
+    tool_call = LLMToolCall(
+        id="call-step",
+        type="function",
+        function={"name": "fetch", "arguments": "{}"},
+    )
+    await callbacks.on_agent_step(
+        AgentStep(
+            thought=None,
+            action=tool_call,
+            observation={"ok": True},
+        )
+    )
+
+    payloads = [
+        (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+        for _ in range(3)
+    ]
+    assert [item["type"] for item in payloads] == [
+        "STEP_STARTED",
+        "TOOL_CALL_RESULT",
+        "STEP_FINISHED",
+    ]
+    assert payloads[0]["stepName"] == "fetch"
+    assert payloads[2]["stepName"] == "fetch"
+
+
+@pytest.mark.asyncio
+async def test_on_agent_error_closes_open_tool_call_stream():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_input=_build_run_input(),
+    )
+
+    await callbacks.on_tool_call_chunk_generated(
+        LLMToolCallChunk(
+            index=0,
+            tool_call_id="call-1",
+            tool_name="ask_user_confirm",
+            arguments_delta='{"question":"go?"}',
+        )
+    )
+    await callbacks.on_agent_error(RuntimeError("boom"))
+
+    payloads = [
+        (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+        for _ in range(5)
+    ]
+    assert [item["type"] for item in payloads] == [
+        "TOOL_CALL_START",
+        "TOOL_CALL_ARGS",
+        "TOOL_CALL_END",
+        "RUN_ERROR",
+        "STATE_DELTA",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_on_agent_start_emits_activity_snapshot_and_tool_activity_deltas():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_input=_build_run_input(),
+    )
+
+    await callbacks.on_agent_start()
+    await callbacks.on_tool_calls_generated(
+        [
+            LLMToolCall(
+                id="call-1",
+                type="function",
+                function={"name": "ask_user_confirm", "arguments": "{\"question\":\"go?\"}"},
+            )
+        ]
+    )
+
+    payloads = [
+        (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+        for _ in range(10)
+    ]
+    event_types = [item["type"] for item in payloads]
+    assert "ACTIVITY_SNAPSHOT" in event_types
+    assert "ACTIVITY_DELTA" in event_types

@@ -167,7 +167,7 @@ class AgentSessionHandler:
         if isinstance(event, dict):
             await self._send_json(event)
             return
-        await self._send_json({"type": "CUSTOM", "name": "ps.meta.unknown_event", "value": str(event)})
+        await self._send_json({"type": "RAW", "event": str(event), "source": "prismaspace.agent.websocket"})
 
     async def _send_json(self, payload: dict):
         try:

@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, WebSocket, Depends, Body
+from fastapi import APIRouter, WebSocket, Depends, Body, Request
 from fastapi.responses import StreamingResponse
 from ag_ui.encoder import EventEncoder
 
@@ -29,10 +29,12 @@ async def execute_agent(
 async def stream_agent(
     uuid: str,
     request: RunAgentInputExt = Body(...),
-    context: AppContext = AuthContextDep
+    context: AppContext = AuthContextDep,
+    http_request: Request = None,
 ):
     service = AgentService(context)
-    encoder = EventEncoder()
+    accept = http_request.headers.get("accept") if http_request else None
+    encoder = EventEncoder(accept=accept)
 
     def _encode(event):
         if hasattr(event, "model_dump"):
@@ -75,7 +77,7 @@ async def stream_agent(
 
     return StreamingResponse(
         sse_generator(),
-        media_type="text/event-stream",
+        media_type=encoder.get_content_type(),
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

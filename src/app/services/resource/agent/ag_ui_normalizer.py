@@ -52,6 +52,17 @@ class AgUiNormalizer:
                 content=self._agui_to_content_text(message.content),
                 tool_call_id=message.tool_call_id,
             )
+        if role == "reasoning":
+            reasoning = self._agui_to_content_text(message.content).strip()
+            if not reasoning:
+                return None
+            return LLMMessage(role="system", content=f"[REASONING]\n{reasoning}")
+        if role == "activity":
+            activity_type = str(getattr(message, "activity_type", "activity") or "activity")
+            activity_payload = self._agui_to_content_text(getattr(message, "content", None))
+            if not activity_payload:
+                return None
+            return LLMMessage(role="system", content=f"[ACTIVITY:{activity_type}] {activity_payload}")
         if role in ("developer", "system"):
             return LLMMessage(role="system", content=self._agui_to_content_text(message.content))
         return None

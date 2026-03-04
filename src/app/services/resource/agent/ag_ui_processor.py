@@ -22,8 +22,6 @@ class AgUiProcessor:
     def agui_to_agent_runtime(self, run_input: RunAgentInputExt) -> AgUiProcessedRun:
         if not isinstance(run_input.thread_id, str) or not run_input.thread_id.strip():
             raise ServiceException("threadId is required.")
-        if len(run_input.thread_id) > 36:
-            raise ServiceException("threadId length must be <= 36 to map to session uuid.")
 
         input_query, input_content_parts, history = self.normalizer.agui_messages_to_query_and_history(
             run_input.messages or []
@@ -32,7 +30,8 @@ class AgUiProcessor:
         resume_tool_messages = self.normalizer.agui_to_resume_tool_messages(run_input)
         if resume_tool_messages:
             history.extend(resume_tool_messages)
-        if not input_query and not input_content_parts:
+        # AG-UI interrupt resume can continue without a fresh user message.
+        if not input_query and not input_content_parts and not resume_tool_messages:
             raise ServiceException("Run input messages must include at least one user message content.")
 
         input_content: str | List[Dict[str, JsonValue]] = (

@@ -68,9 +68,12 @@ from app.engine.model.llm import (
 )
 from app.engine.utils.tokenizer.manager import tokenizer_manager
 from ag_ui.core import (
+    ActivityDeltaEvent,
+    ActivitySnapshotEvent,
     CustomEvent,
     EventType,
     MessagesSnapshotEvent,
+    RawEvent,
     ReasoningEndEvent,
     ReasoningMessageContentEvent,
     ReasoningMessageEndEvent,
@@ -78,6 +81,8 @@ from ag_ui.core import (
     ReasoningStartEvent,
     RunErrorEvent,
     RunStartedEvent,
+    StepFinishedEvent,
+    StepStartedEvent,
     StateDeltaEvent,
     StateSnapshotEvent,
     TextMessageContentEvent,
@@ -90,6 +95,7 @@ from ag_ui.core import (
 )
 
 logger = logging.getLogger(__name__)
+SESSION_UUID_NAMESPACE = uuid.UUID("6523b53a-7ca1-5729-a450-865dfc64f245")
 
 
 class PersistingAgentCallbacks(AgentEngineCallbacks):
@@ -123,6 +129,11 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.reasoning_message_id = (
             f"reasoning-{run_input.run_id}" if run_input else f"reasoning-{self.trace_id}"
         )
+        self.activity_message_id = (
+            f"activity-{run_input.run_id}" if run_input else f"activity-{self.trace_id}"
+        )
+        self.activity_initialized = False
+        self.activity_state: Dict[str, Any] = {"status": "running", "tools": {}}
         self.text_started = False
         self.reasoning_started = False
         self.tool_call_stream_states: Dict[str, Dict[str, Any]] = {}
@@ -150,6 +161,101 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         )
 
     @staticmethod
+    def _json_pointer_escape(value: str) -> str:
+        return value.replace("~", "~0").replace("/", "~1")
+
+    async def _emit_activity_snapshot_if_needed(self):
+        if not self.run_input or self.activity_initialized:
+            return
+        self.activity_initialized = True
+        await self._emit(
+            ActivitySnapshotEvent(
+                type=EventType.ACTIVITY_SNAPSHOT,
+                message_id=self.activity_message_id,
+                activity_type="tool_call_timeline",
+                content=self.activity_state,
+                replace=True,
+            )
+        )
+
+    async def _emit_activity_delta(self, patch: List[Dict[str, Any]]):
+        if not self.activity_initialized or not patch:
+            return
+        await self._emit(
+            ActivityDeltaEvent(
+                type=EventType.ACTIVITY_DELTA,
+                message_id=self.activity_message_id,
+                activity_type="tool_call_timeline",
+                patch=patch,
+            )
+        )
+
+    async def _set_activity_status(self, status: str):
+        if not self.activity_initialized:
+            return
+        self.activity_state["status"] = status
+        await self._emit_activity_delta(
+            [{"op": "replace", "path": "/status", "value": status}]
+        )
+
+    async def _upsert_activity_tool(self, tool_call_id: str, tool_name: str):
+        if not self.activity_initialized or not tool_call_id:
+            return
+        tools = self.activity_state["tools"]
+        if tool_call_id not in tools:
+            tools[tool_call_id] = {
+                "name": tool_name,
+                "args": "",
+                "status": "started",
+                "result": None,
+            }
+            escaped = self._json_pointer_escape(tool_call_id)
+            await self._emit_activity_delta(
+                [{"op": "add", "path": f"/tools/{escaped}", "value": tools[tool_call_id]}]
+            )
+            return
+        tools[tool_call_id]["name"] = tool_name or tools[tool_call_id].get("name", "")
+        tools[tool_call_id]["status"] = "started"
+        escaped = self._json_pointer_escape(tool_call_id)
+        await self._emit_activity_delta(
+            [
+                {"op": "replace", "path": f"/tools/{escaped}/name", "value": tools[tool_call_id]["name"]},
+                {"op": "replace", "path": f"/tools/{escaped}/status", "value": "started"},
+            ]
+        )
+
+    async def _append_activity_tool_args(self, tool_call_id: str, delta: str):
+        if not self.activity_initialized or not tool_call_id:
+            return
+        if tool_call_id not in self.activity_state["tools"]:
+            await self._upsert_activity_tool(tool_call_id, "")
+        tool_state = self.activity_state["tools"][tool_call_id]
+        tool_state["args"] = f"{tool_state.get('args', '')}{delta}"
+        escaped = self._json_pointer_escape(tool_call_id)
+        await self._emit_activity_delta(
+            [{"op": "replace", "path": f"/tools/{escaped}/args", "value": tool_state["args"]}]
+        )
+
+    async def _finalize_activity_tool(self, tool_call_id: str, status: str, result: Optional[str] = None):
+        if not self.activity_initialized or not tool_call_id:
+            return
+        if tool_call_id not in self.activity_state["tools"]:
+            await self._upsert_activity_tool(tool_call_id, "")
+        tool_state = self.activity_state["tools"][tool_call_id]
+        tool_state["status"] = status
+        escaped = self._json_pointer_escape(tool_call_id)
+        patch: List[Dict[str, Any]] = [
+            {"op": "replace", "path": f"/tools/{escaped}/status", "value": status}
+        ]
+        if result is not None:
+            if tool_state.get("result") is None:
+                patch.append({"op": "add", "path": f"/tools/{escaped}/result", "value": result})
+            else:
+                patch.append({"op": "replace", "path": f"/tools/{escaped}/result", "value": result})
+            tool_state["result"] = result
+        await self._emit_activity_delta(patch)
+
+    @staticmethod
     def _normalize_tool_args(tool_args: Any) -> str:
         if isinstance(tool_args, str):
             return tool_args
@@ -166,6 +272,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 parent_message_id=self.assistant_message_id,
             )
         )
+        await self._upsert_activity_tool(tool_call_id, tool_name)
 
     async def _emit_tool_call_args(self, tool_call_id: str, delta: str):
         await self._emit(
@@ -175,6 +282,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 delta=delta,
             )
         )
+        await self._append_activity_tool_args(tool_call_id, delta)
 
     async def _emit_tool_call_end(self, tool_call_id: str):
         await self._emit(
@@ -183,8 +291,17 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 tool_call_id=tool_call_id,
             )
         )
+        await self._finalize_activity_tool(tool_call_id, "awaiting_result")
 
     async def _close_open_messages(self):
+        for state in list(self.tool_call_stream_states.values()):
+            tool_call_id = state.get("tool_call_id")
+            if tool_call_id and state.get("started") and not state.get("ended"):
+                await self._emit_tool_call_end(tool_call_id=tool_call_id)
+                state["ended"] = True
+        self.tool_call_stream_states.clear()
+        self.tool_call_index_states.clear()
+
         if self.text_started:
             self.text_started = False
             await self._emit(
@@ -238,6 +355,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 delta=[{"op": "add", "path": "/runStatus", "value": "running"}],
             )
         )
+        await self._emit_activity_snapshot_if_needed()
         await self._emit_custom("ps.meta.trace", self._base_meta())
 
     async def on_tool_calls_generated(self, tool_calls: List[LLMToolCall]):
@@ -328,6 +446,14 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             index_state["args_emitted"] = True
 
     async def on_agent_step(self, step: AgentStep):
+        step_name = step.action.function.get("name", "") if isinstance(step.action.function, dict) else ""
+        step_name = step_name or step.action.id
+        await self._emit(
+            StepStartedEvent(
+                type=EventType.STEP_STARTED,
+                step_name=step_name,
+            )
+        )
         if step.thought and self.session_manager:
             self.session_manager.buffer_message(
                 role=MessageRole.REASONING,
@@ -348,6 +474,13 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 tool_call_id=step.action.id,
                 content=output_text,
                 role="tool",
+            )
+        )
+        await self._finalize_activity_tool(step.action.id, "completed", result=output_text)
+        await self._emit(
+            StepFinishedEvent(
+                type=EventType.STEP_FINISHED,
+                step_name=step_name,
             )
         )
         if self.session_manager:
@@ -438,6 +571,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.has_terminal_event = True
         await self._close_open_messages()
         await self._persist_assistant(result)
+        await self._set_activity_status("completed")
         if self.run_input:
             await self._emit(
                 RunFinishedEventExt(
@@ -462,6 +596,9 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.has_terminal_event = True
         await self._close_open_messages()
         await self._persist_assistant(result)
+        for call in result.client_tool_calls or []:
+            await self._finalize_activity_tool(call.tool_call_id, "awaiting_client")
+        await self._set_activity_status("interrupted")
         if self.run_input:
             await self._emit(
                 RunFinishedEventExt(
@@ -491,6 +628,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.has_terminal_event = True
         await self._close_open_messages()
         await self._persist_assistant(result)
+        await self._set_activity_status("cancelled")
         if self.run_input:
             await self._emit(
                 RunFinishedEventExt(
@@ -513,6 +651,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             return
         self.has_terminal_event = True
         await self._close_open_messages()
+        await self._set_activity_status("error")
         if self.run_input:
             await self._emit(
                 RunErrorEvent(
@@ -571,7 +710,19 @@ class AgentService(ResourceImplementationService):
             return event.model_dump(mode="json", by_alias=True, exclude_none=True)
         if isinstance(event, dict):
             return event
-        return {"type": "CUSTOM", "name": "ps.meta.unknown_event", "value": str(event)}
+        return RawEvent(
+            type=EventType.RAW,
+            event=str(event),
+            source="prismaspace.agent",
+        ).model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    @staticmethod
+    def _resolve_session_uuid(thread_id: str, actor_id: int, instance_id: int) -> str:
+        # Backward compatible with legacy threadId=sessionUuid mapping.
+        if len(thread_id) <= 36:
+            return thread_id
+        scoped_value = f"{actor_id}:{instance_id}:{thread_id}"
+        return str(uuid.uuid5(SESSION_UUID_NAMESPACE, scoped_value))
 
     async def execute(
         self, 
@@ -658,9 +809,10 @@ class AgentService(ResourceImplementationService):
 
         # 4. Session Manager
         trace_id = str(uuid.uuid4())
+        session_uuid = self._resolve_session_uuid(processed.session_uuid, actor.id, instance.id)
         session_manager = AgentSessionManager(
             self.context,
-            processed.session_uuid,
+            session_uuid,
             trace_id,
             instance,
             workspace,
