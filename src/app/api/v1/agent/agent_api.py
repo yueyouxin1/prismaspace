@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, WebSocket, Depends, Body, Request
 from fastapi.responses import StreamingResponse
 from ag_ui.encoder import EventEncoder
+from ag_ui.core import EventType, RunErrorEvent
 
 from app.core.context import AppContext
 from app.api.dependencies.context import AuthContextDep
@@ -22,7 +23,7 @@ async def execute_agent(
     context: AppContext = AuthContextDep
 ):
     service = AgentService(context)
-    result = await service.execute(uuid, request, context.actor)
+    result = await service.sync_execute(uuid, request, context.actor)
     return JsonResponse(data=result)
 
 @router.post("/{uuid}/sse", summary="AG-UI Run (SSE)")
@@ -54,23 +55,27 @@ async def stream_agent(
                 cancel_fn()
             raise
         except ServiceException as exc:
-            yield _encode({
-                "type": "RUN_ERROR",
-                "threadId": request.thread_id,
-                "runId": request.run_id,
-                "code": "AGENT_SERVICE_ERROR",
-                "message": str(exc),
-                "retriable": False,
-            })
+            yield _encode(
+                RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    threadId=request.thread_id,
+                    runId=request.run_id,
+                    code="AGENT_SERVICE_ERROR",
+                    message=str(exc),
+                    retriable=False,
+                )
+            )
         except Exception as exc:
-            yield _encode({
-                "type": "RUN_ERROR",
-                "threadId": request.thread_id,
-                "runId": request.run_id,
-                "code": "AGENT_RUNTIME_ERROR",
-                "message": str(exc),
-                "retriable": False,
-            })
+            yield _encode(
+                RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    threadId=request.thread_id,
+                    runId=request.run_id,
+                    code="AGENT_RUNTIME_ERROR",
+                    message=str(exc),
+                    retriable=False,
+                )
+            )
         finally:
             if callable(cancel_fn):
                 cancel_fn()

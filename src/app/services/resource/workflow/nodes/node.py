@@ -19,7 +19,7 @@ from app.engine.utils.parameter_schema_utils import schemas2obj
 from app.engine.utils.stream import StreamBroadcaster
 from app.engine.workflow.definitions import NodeExecutionResult, NodeResultData, ParameterSchema
 from app.engine.workflow.registry import BaseNode, register_node
-from app.schemas.resource.execution_schemas import AnyExecutionRequest
+from app.schemas.resource.execution_schemas import GenericExecutionRequest
 from app.services.common.llm_capability_provider import UsageAccumulator
 from app.services.exceptions import NotFoundError
 from app.utils.async_generator import AsyncGeneratorManager
@@ -613,7 +613,7 @@ class AppToolNode(BaseNode):
             raise ValueError("Tool UUID not configured.")
 
         exec_service = ExecutionService(app_context)
-        request = AnyExecutionRequest(inputs=node_input)
+        request = GenericExecutionRequest(inputs=node_input)
         result = await exec_service.execute_instance(
             instance_uuid=tool_uuid,
             execute_params=request,

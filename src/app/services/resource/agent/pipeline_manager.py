@@ -11,6 +11,7 @@ from app.services.resource.agent.agent_session_manager import AgentSessionManage
 # Processors
 from .processors import (
     AgentPipelineContext, BaseContextProcessor, BaseSkillProcessor,
+    CustomHistoryMergeProcessor, ToolChainAlignmentProcessor,
     ShortContextProcessor, RAGContextProcessor, DeepMemoryProcessor,
     DependencySkillsProcessor, DeepMemorySkillsProcessor, MemoryVarSkillsProcessor
 )
@@ -78,6 +79,15 @@ class AgentPipelineManager:
                 session_manager, 
                 agent_config.deep_memory
             ))
+
+        # 1.4 Custom History Merge (append right before final user message assembly)
+        if session_manager and self.history:
+            self._context_processors.append(
+                CustomHistoryMergeProcessor(self.history)
+            )
+
+        # 1.5 Tool Chain Alignment (must be the last context processor)
+        self._context_processors.append(ToolChainAlignmentProcessor())
 
         # ======================================================================
         # 2. Skill Processors (构建 Tool 列表)

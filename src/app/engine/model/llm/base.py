@@ -30,6 +30,7 @@ class LLMMessage(BaseModel):
     content: Optional[Union[str, List[Dict[str, Any]]]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None # 模型生成的 tool_calls
     tool_call_id: Optional[str] = None # role='tool' 时需要
+    encrypted_value: Optional[str] = None  # 用于跨轮传递加密 reasoning 值
 
 class LLMRunConfig(BaseModel):
     """定义单次模型运行的配置"""
@@ -65,6 +66,7 @@ class LLMToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
     function: Dict[str, str] # e.g., {"name": "get_weather", "arguments": '{"location": "beijing"}'}
+    encrypted_value: Optional[str] = None
 
 
 class LLMToolCallChunk(BaseModel):

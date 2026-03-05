@@ -55,12 +55,14 @@ class LLMEngineService:
             # 步骤 1: 使用上下文管理器处理消息 (如果设置了 max_context_window)
             managed_messages = messages
             if run_config.max_context_window:
+                reserve_tokens = max(500, run_config.max_tokens)
+                reserve_tokens = min(reserve_tokens, max(run_config.max_context_window // 2, 1))
                 managed_messages = self.context_manager.manage(
                     messages=messages,
                     provider=provider_config.client_name,
                     model=run_config.model,
                     max_context_tokens=run_config.max_context_window,
-                    max_tokens=run_config.max_tokens
+                    reserve_tokens=reserve_tokens,
                 )
 
             # 步骤 2: 获取客户端实例

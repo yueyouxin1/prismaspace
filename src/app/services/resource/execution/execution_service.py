@@ -11,9 +11,15 @@ from app.models.resource import Resource, ResourceInstance, VersionStatus
 from app.dao.resource.resource_dao import ResourceInstanceDao
 from app.services.resource.base.base_resource_service import BaseResourceService
 from app.services.exceptions import NotFoundError, ServiceException
-from app.schemas.resource.execution_schemas import AnyExecutionRequest, AnyExecutionResponse
+from app.schemas.resource.execution_schemas import (
+    AnyExecutionRequest,
+    AnyExecutionResponse,
+    ExecutionBatchResponse,
+    normalize_execution_request,
+)
 from app.services.billing.interceptor import InsufficientFundsError
 from app.core.config import settings
+from pydantic import ValidationError
 
 class ExecutionService(BaseResourceService):
     """
@@ -34,14 +40,20 @@ class ExecutionService(BaseResourceService):
         try:
             # 分派给专家服务
             impl_service = await self._get_impl_service_by_instance(instance_uuid)
+            normalized_params = normalize_execution_request(
+                resource_type=impl_service.name,
+                payload=execute_params,
+            )
 
             # [MODIFIED] The `execute` signature now accepts the billing context
             return await impl_service.execute(
                 instance_uuid=instance_uuid,
-                execute_params=execute_params,
+                execute_params=normalized_params,
                 actor=actor,
                 runtime_workspace=runtime_workspace
             )
+        except (ValidationError, TypeError, ValueError) as e:
+            raise ServiceException(f"Invalid execution parameters: {e}")
 
         except InsufficientFundsError as e:
             # 资金不足的异常会被 billing_context 正常捕获并传递上来
@@ -55,27 +67,33 @@ class ExecutionService(BaseResourceService):
         execute_params: AnyExecutionRequest,
         actor: User,
         runtime_workspace: Optional[Workspace] = None
-    ) -> AnyExecutionResponse:
+    ) -> ExecutionBatchResponse:
         """
         [NEW] 批量执行入口。
         目前假设所有 UUID 属于同一种资源类型（例如都是 VectorDB）。
         """
         if not instance_uuids:
-            return AnyExecutionResponse(data=[])
+            return []
 
         # 1. 确定资源类型 (取第一个)
         # 在实际复杂场景中，可能需要分组处理不同类型的资源，但通常 Batch 操作针对同类资源
         first_uuid = instance_uuids[0]
         impl_service = await self._get_impl_service_by_instance(first_uuid)
+        normalized_params = normalize_execution_request(
+            resource_type=impl_service.name,
+            payload=execute_params,
+        )
 
         try:
             # 2. 调用具体的批量实现
             return await impl_service.execute_batch(
                 instance_uuids=instance_uuids,
-                execute_params=execute_params,
+                execute_params=normalized_params,
                 actor=actor,
                 runtime_workspace=runtime_workspace
             )
+        except (ValidationError, TypeError, ValueError) as e:
+            raise ServiceException(f"Invalid batch execution parameters: {e}")
 
         except InsufficientFundsError as e:
             raise InsufficientFundsError(f"Batch execution failed due to insufficient funds: {e}")

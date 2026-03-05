@@ -95,6 +95,16 @@ class AICapabilityProvider:
         # 引擎层是无状态的，可以复用
         self._llm_engine = LLMEngineService()
         
+    @staticmethod
+    def _resolve_llm_client_name(module_context: ModuleRuntimeContext) -> str:
+        attributes = module_context.version.attributes if isinstance(module_context.version.attributes, dict) else {}
+        client_name = attributes.get("client_name")
+        if isinstance(client_name, str) and client_name.strip():
+            return client_name.strip()
+        raise ConfigurationError(
+            f"LLM module version '{module_context.version.name}' attributes missing required 'client_name'."
+        )
+
     # ==========================================================================
     # 1. Resource Resolution
     # ==========================================================================
@@ -190,9 +200,9 @@ class AICapabilityProvider:
         # 内部使用，用于连接 Billing Wrapper
         _usage_accumulator: Optional[UsageAccumulator] = None
     ) -> LLMResult:
-        
+        client_name = self._resolve_llm_client_name(module_context)
         provider_config = LLMProviderConfig(
-            client_name=module_context.version.attributes.get('client_name'),
+            client_name=client_name,
             api_key=module_context.credential.api_key,
             base_url=module_context.credential.endpoint
         )
@@ -247,9 +257,9 @@ class AICapabilityProvider:
         callbacks: Optional[AgentEngineCallbacks] = None,
         max_iterations: int = 10
     ) -> AgentResult:
-        
+        client_name = self._resolve_llm_client_name(module_context)
         provider_config = LLMProviderConfig(
-            client_name=module_context.version.attributes.get('client_name'),
+            client_name=client_name,
             api_key=module_context.credential.api_key,
             base_url=module_context.credential.endpoint
         )

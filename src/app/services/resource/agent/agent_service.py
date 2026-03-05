@@ -5,7 +5,7 @@ import logging
 import uuid
 import asyncio
 import time
-from typing import Dict, Any, List, Callable, Optional, AsyncGenerator, Union
+from typing import Dict, Any, List, Callable, Optional, AsyncGenerator, Union, Set
 from decimal import Decimal
 from contextlib import asynccontextmanager, nullcontext
 from sqlalchemy import func
@@ -25,7 +25,7 @@ from app.dao.product.feature_dao import FeatureDao
 # Schemas
 from app.schemas.resource.agent.agent_schemas import (
     AgentUpdate, AgentRead, AgentConfig, GenerationDiversity, AgentRAGConfig, ModelParams,
-    InputOutputConfig, DeepMemoryConfig
+    InputOutputConfig, DeepMemoryConfig, AgentExecutionRequest, AgentExecutionResponse
 )
 from app.schemas.protocol import (
     AgUiInterrupt,
@@ -53,9 +53,9 @@ from app.services.resource.agent.memory.deep.long_term_context_service import Lo
 from app.services.resource.agent.memory.deep.context_summary_service import ContextSummaryService
 from app.services.resource.agent.pipeline_manager import AgentPipelineManager
 from app.services.resource.agent.processors import ResourceAwareToolExecutor
-from app.services.resource.agent.ag_ui_normalizer import AgUiNormalizer
-from app.services.resource.agent.ag_ui_processor import AgUiProcessor
-from app.services.exceptions import ServiceException, NotFoundError, ConfigurationError
+from app.services.resource.agent.protocol_adapter import AgUiProtocolAdapter, ProtocolAdapterRegistry
+from app.schemas.resource.execution_schemas import AnyExecutionRequest, AnyExecutionResponse
+from app.services.exceptions import ServiceException, NotFoundError, ConfigurationError, PermissionDeniedError
 from app.services.product.types.feature import FeatureRole
 from app.services.resource.agent.types.agent import AgentRunResult
 
@@ -75,6 +75,7 @@ from ag_ui.core import (
     MessagesSnapshotEvent,
     RawEvent,
     ReasoningEndEvent,
+    ReasoningEncryptedValueEvent,
     ReasoningMessageContentEvent,
     ReasoningMessageEndEvent,
     ReasoningMessageStartEvent,
@@ -95,7 +96,6 @@ from ag_ui.core import (
 )
 
 logger = logging.getLogger(__name__)
-SESSION_UUID_NAMESPACE = uuid.UUID("6523b53a-7ca1-5729-a450-865dfc64f245")
 
 
 class PersistingAgentCallbacks(AgentEngineCallbacks):
@@ -138,6 +138,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.reasoning_started = False
         self.tool_call_stream_states: Dict[str, Dict[str, Any]] = {}
         self.tool_call_index_states: Dict[int, Dict[str, Any]] = {}
+        self._emitted_encrypted_entities: Set[str] = set()
 
     def _base_meta(self) -> Dict[str, Any]:
         session_uuid = self.session_manager.session.uuid if self.session_manager and self.session_manager.session else None
@@ -157,6 +158,29 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 type=EventType.CUSTOM,
                 name=name,
                 value=value,
+            )
+        )
+
+    async def _emit_reasoning_encrypted_value(
+        self,
+        *,
+        subtype: str,
+        entity_id: str,
+        encrypted_value: Optional[str],
+    ) -> None:
+        encrypted_text = encrypted_value.strip() if isinstance(encrypted_value, str) else ""
+        if not encrypted_text or not entity_id:
+            return
+        entity_key = f"{subtype}:{entity_id}"
+        if entity_key in self._emitted_encrypted_entities:
+            return
+        self._emitted_encrypted_entities.add(entity_key)
+        await self._emit(
+            ReasoningEncryptedValueEvent(
+                type=EventType.REASONING_ENCRYPTED_VALUE,
+                subtype=subtype,
+                entity_id=entity_id,
+                encrypted_value=encrypted_text,
             )
         )
 
@@ -325,6 +349,12 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 )
             )
 
+    async def _emit_result_reasoning_if_needed(self, result: AgentResult):
+        reasoning_text = (result.reasoning_content or "").strip()
+        if not reasoning_text or self.reasoning_started:
+            return
+        await self.on_reasoning_chunk_generated(reasoning_text)
+
     async def on_agent_start(self):
         if not self.run_input:
             return
@@ -395,6 +425,12 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             if not state.get("ended"):
                 await self._emit_tool_call_end(tool_call_id=tool_call_id)
                 state["ended"] = True
+
+            await self._emit_reasoning_encrypted_value(
+                subtype="tool-call",
+                entity_id=tool_call_id,
+                encrypted_value=tool_call.get("encryptedValue") or tool_call.get("encrypted_value"),
+            )
 
         # 一轮工具调用收口后清理状态，避免跨轮污染。
         self.tool_call_stream_states.clear()
@@ -555,13 +591,15 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         text_content = result.message.content if isinstance(result.message.content, str) else None
         content_parts = result.message.content if isinstance(result.message.content, list) else None
         reasoning_content = result.reasoning_content
-        if not text_content and not content_parts and not reasoning_content:
+        encrypted_value = result.message.encrypted_value
+        if not text_content and not content_parts and not reasoning_content and not encrypted_value:
             return
         self.session_manager.buffer_message(
             role=MessageRole.ASSISTANT,
             text_content=text_content,
             content_parts=content_parts,
             reasoning_content=reasoning_content,
+            encrypted_value=encrypted_value,
         )
 
     async def on_agent_finish(self, result: AgentResult):
@@ -569,8 +607,14 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if self.has_terminal_event:
             return
         self.has_terminal_event = True
+        await self._emit_result_reasoning_if_needed(result)
         await self._close_open_messages()
         await self._persist_assistant(result)
+        await self._emit_reasoning_encrypted_value(
+            subtype="message",
+            entity_id=self.assistant_message_id,
+            encrypted_value=result.message.encrypted_value,
+        )
         await self._set_activity_status("completed")
         if self.run_input:
             await self._emit(
@@ -594,8 +638,14 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if self.has_terminal_event:
             return
         self.has_terminal_event = True
+        await self._emit_result_reasoning_if_needed(result)
         await self._close_open_messages()
         await self._persist_assistant(result)
+        await self._emit_reasoning_encrypted_value(
+            subtype="message",
+            entity_id=self.assistant_message_id,
+            encrypted_value=result.message.encrypted_value,
+        )
         for call in result.client_tool_calls or []:
             await self._finalize_activity_tool(call.tool_call_id, "awaiting_client")
         await self._set_activity_status("interrupted")
@@ -626,8 +676,14 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if self.has_terminal_event:
             return
         self.has_terminal_event = True
+        await self._emit_result_reasoning_if_needed(result)
         await self._close_open_messages()
         await self._persist_assistant(result)
+        await self._emit_reasoning_encrypted_value(
+            subtype="message",
+            entity_id=self.assistant_message_id,
+            encrypted_value=result.message.encrypted_value,
+        )
         await self._set_activity_status("cancelled")
         if self.run_input:
             await self._emit(
@@ -696,8 +752,8 @@ class AgentService(ResourceImplementationService):
         self.agent_memory_var_service = AgentMemoryVarService(context)
         self.long_term_service = LongTermContextService(context)
         self.prompt_template = PromptTemplate()
-        self.ag_ui_normalizer = AgUiNormalizer()
-        self.ag_ui_processor = AgUiProcessor(self.ag_ui_normalizer)
+        self.protocol_adapters = ProtocolAdapterRegistry()
+        self.protocol_adapters.register("ag-ui", AgUiProtocolAdapter())
         self.resource_resolver = BaseResourceService(context)
 
     # ==========================================================================
@@ -717,14 +773,200 @@ class AgentService(ResourceImplementationService):
         ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
     @staticmethod
-    def _resolve_session_uuid(thread_id: str, actor_id: int, instance_id: int) -> str:
-        # Backward compatible with legacy threadId=sessionUuid mapping.
-        if len(thread_id) <= 36:
-            return thread_id
-        scoped_value = f"{actor_id}:{instance_id}:{thread_id}"
-        return str(uuid.uuid5(SESSION_UUID_NAMESPACE, scoped_value))
+    def _is_valid_platform_session_uuid(session_uuid: str) -> bool:
+        if not isinstance(session_uuid, str):
+            return False
+        value = session_uuid.strip()
+        if not value:
+            return False
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            return False
+        return str(parsed) == value.lower()
 
-    async def execute(
+    @staticmethod
+    def _resolve_protocol_name(run_input: RunAgentInputExt) -> str:
+        props = run_input.forwarded_props if isinstance(run_input.forwarded_props, dict) else {}
+        candidate = props.get("protocol")
+        if not isinstance(candidate, str) or not candidate.strip():
+            return "ag-ui"
+
+        normalized = candidate.strip().lower()
+        aliases = {
+            "agui": "ag-ui",
+            "ag-ui": "ag-ui",
+        }
+        return aliases.get(normalized, normalized)
+
+    @staticmethod
+    def _parse_positive_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, float):
+            ivalue = int(value)
+            return ivalue if ivalue > 0 else None
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                ivalue = int(text)
+                return ivalue if ivalue > 0 else None
+        return None
+
+    @classmethod
+    def _resolve_model_context_window(cls, model_attributes: Any) -> int:
+        fallback = 8192
+        if not isinstance(model_attributes, dict):
+            logger.warning(
+                "LLM module attributes are invalid or missing; falling back max_context_window=%s",
+                fallback,
+            )
+            return fallback
+
+        resolved = cls._parse_positive_int(model_attributes.get("context_window"))
+        if resolved:
+            return resolved
+
+        logger.warning(
+            "LLM module attributes do not define valid 'context_window'; falling back max_context_window=%s",
+            fallback,
+        )
+        return fallback
+
+    @staticmethod
+    def _extract_pending_tool_call_ids(messages: List[ChatMessage]) -> Set[str]:
+        if not messages:
+            return set()
+
+        resolved_tool_call_ids: Set[str] = set()
+        pending_tool_call_ids: Set[str] = set()
+
+        for message in reversed(messages):
+            role = getattr(message, "role", None)
+            role_value = role.value if hasattr(role, "value") else str(role or "")
+
+            if role_value == MessageRole.TOOL.value:
+                tool_call_id = getattr(message, "tool_call_id", None)
+                if isinstance(tool_call_id, str) and tool_call_id:
+                    resolved_tool_call_ids.add(tool_call_id)
+                continue
+
+            if role_value != MessageRole.ASSISTANT.value:
+                continue
+
+            tool_calls = getattr(message, "tool_calls", None)
+            if not isinstance(tool_calls, list):
+                continue
+
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_call_id = tool_call.get("id")
+                if (
+                    isinstance(tool_call_id, str)
+                    and tool_call_id
+                    and tool_call_id not in resolved_tool_call_ids
+                ):
+                    pending_tool_call_ids.add(tool_call_id)
+
+        return pending_tool_call_ids
+
+    async def _enforce_pending_tool_results(
+        self,
+        session_manager: AgentSessionManager,
+        resume_tool_call_ids: List[str],
+    ) -> None:
+        if not session_manager.session:
+            return
+
+        recent_messages = await session_manager.session_service.get_recent_messages(
+            session_id=session_manager.session.id,
+            limit=20,
+        )
+        pending_tool_call_ids = self._extract_pending_tool_call_ids(recent_messages)
+        if not pending_tool_call_ids:
+            return
+
+        provided_tool_call_ids = {
+            tool_call_id.strip()
+            for tool_call_id in (resume_tool_call_ids or [])
+            if isinstance(tool_call_id, str) and tool_call_id.strip()
+        }
+        missing_tool_call_ids = pending_tool_call_ids - provided_tool_call_ids
+        if not missing_tool_call_ids:
+            return
+
+        raise ServiceException(
+            "Pending client tool results are required for toolCallIds: "
+            + ", ".join(sorted(missing_tool_call_ids))
+        )
+
+    def _buffer_custom_history_messages(
+        self,
+        session_manager: AgentSessionManager,
+        history: List[LLMMessage],
+    ) -> None:
+        if not session_manager.session or not history:
+            return
+
+        for message in history:
+            if not isinstance(message, LLMMessage):
+                continue
+            mapped_role = {
+                "system": MessageRole.SYSTEM,
+                "user": MessageRole.USER,
+                "assistant": MessageRole.ASSISTANT,
+                "tool": MessageRole.TOOL,
+            }.get(message.role)
+            if not mapped_role:
+                continue
+
+            reasoning_content: Optional[str] = None
+            text_content: Optional[str] = message.content if isinstance(message.content, str) else None
+            content_parts = message.content if isinstance(message.content, list) else None
+
+            if (
+                mapped_role == MessageRole.SYSTEM
+                and isinstance(text_content, str)
+                and text_content.startswith("[CONTEXT]\n")
+            ):
+                continue
+
+            if (
+                mapped_role == MessageRole.SYSTEM
+                and isinstance(text_content, str)
+                and text_content.startswith("[REASONING]\n")
+            ):
+                mapped_role = MessageRole.REASONING
+                reasoning_content = text_content[len("[REASONING]\n") :].strip()
+                text_content = reasoning_content
+
+            if mapped_role == MessageRole.TOOL and text_content is None and content_parts is not None:
+                text_content = json.dumps(content_parts, ensure_ascii=False)
+
+            if (
+                text_content is None
+                and not content_parts
+                and not message.tool_calls
+                and not message.tool_call_id
+                and not message.encrypted_value
+                and not reasoning_content
+            ):
+                continue
+
+            session_manager.buffer_message(
+                role=mapped_role,
+                text_content=text_content,
+                content_parts=content_parts,
+                reasoning_content=reasoning_content,
+                encrypted_value=message.encrypted_value,
+                tool_calls=message.tool_calls,
+                tool_call_id=message.tool_call_id,
+            )
+
+    async def sync_execute(
         self, 
         instance_uuid: str, 
         run_input: RunAgentInputExt,
@@ -761,20 +1003,39 @@ class AgentService(ResourceImplementationService):
             events=events,
         )
 
+    async def execute(
+        self,
+        instance_uuid: str,
+        execute_params: AnyExecutionRequest,
+        actor: User,
+        runtime_workspace: Optional[Workspace] = None
+    ) -> AnyExecutionResponse:
+        if not isinstance(execute_params, AgentExecutionRequest):
+            raise ServiceException("Agent execute expects AgentExecutionRequest as execute_params.")
+        run_events = await self.sync_execute(
+            instance_uuid=instance_uuid,
+            run_input=execute_params.inputs,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
+        )
+        return AgentExecutionResponse(data=run_events)
+
     async def execute_batch(
         self,
         instance_uuids: List[str],
-        run_input: RunAgentInputExt,
+        execute_params: AnyExecutionRequest,
         actor: User,
         runtime_workspace: Optional[Workspace] = None
-    ) -> List[RunEventsResponse]:
+    ) -> List[AnyExecutionResponse]:
         """
         Agent 暂不支持真正的并行 Batch（每个都是独立的有状态循环）。
         简单实现为循环调用。
         """
+        if not isinstance(execute_params, AgentExecutionRequest):
+            raise ServiceException("Agent execute_batch expects AgentExecutionRequest as execute_params.")
         results = []
         for uuid in instance_uuids:
-            res = await self.execute(uuid, run_input, actor, runtime_workspace)
+            res = await self.execute(uuid, execute_params, actor, runtime_workspace)
             results.append(res)
         
         return results
@@ -799,9 +1060,14 @@ class AgentService(ResourceImplementationService):
         except Exception as e:
             raise ConfigurationError(f"Agent {instance.uuid} config invalid: {e}")
 
-        # 3. AG-UI input normalization
-        processed = self.ag_ui_processor.agui_to_agent_runtime(run_input)
-        if not processed.input_content and not processed.history:
+        # 3. Protocol adaptation (AG-UI today; extensible for MCP/A2A/ACP adapters)
+        protocol_name = self._resolve_protocol_name(run_input)
+        adapter = self.protocol_adapters.get(protocol_name)
+        if adapter is None:
+            raise ServiceException(f"Unsupported protocol '{protocol_name}'.")
+        tool_executor = ResourceAwareToolExecutor(self.context, workspace)
+        adapted = adapter.adapt(run_input, tool_registrar=tool_executor)
+        if not adapted.input_content and not adapted.history:
             raise ServiceException("Agent input content is required.")
 
         generator_manager = AsyncGeneratorManager()
@@ -809,18 +1075,42 @@ class AgentService(ResourceImplementationService):
 
         # 4. Session Manager
         trace_id = str(uuid.uuid4())
-        session_uuid = self._resolve_session_uuid(processed.session_uuid, actor.id, instance.id)
-        session_manager = AgentSessionManager(
-            self.context,
-            session_uuid,
-            trace_id,
-            instance,
-            workspace,
-            actor,
-            create_if_missing=True,
-        )
-        await session_manager.initialize()
-        session = session_manager.session
+        session_manager: Optional[AgentSessionManager] = None
+        session: Optional[ChatSession] = None
+        session_uuid = adapted.session_uuid.strip() if isinstance(adapted.session_uuid, str) else ""
+
+        if self._is_valid_platform_session_uuid(session_uuid):
+            candidate = AgentSessionManager(
+                self.context,
+                session_uuid,
+                trace_id,
+                instance,
+                workspace,
+                actor,
+                create_if_missing=False,
+            )
+            try:
+                await candidate.initialize()
+                session_manager = candidate
+                session = candidate.session
+            except (NotFoundError, PermissionDeniedError, ServiceException) as exc:
+                logger.info("Ignoring invalid or untrusted session_uuid '%s': %s", session_uuid, exc)
+
+        if session_manager and session_manager.session:
+            await self._enforce_pending_tool_results(
+                session_manager=session_manager,
+                resume_tool_call_ids=adapted.resume_tool_call_ids,
+            )
+            if adapted.history and (adapted.has_custom_history or adapted.resume_tool_call_ids):
+                self._buffer_custom_history_messages(
+                    session_manager=session_manager,
+                    history=adapted.history,
+                )
+
+        if session_manager is None and not adapted.has_custom_history:
+            raise ServiceException(
+                "A valid platform-created session_uuid (threadId) is required when custom messages history is not provided."
+            )
 
         # 5. Prompt Rendering
         prompt_variables = await self.agent_memory_var_service.get_runtime_object(
@@ -830,17 +1120,8 @@ class AgentService(ResourceImplementationService):
 
         # 7. Pipeline Manager
         system_message = LLMMessage(role="system", content=rendered_system_prompt)
-        history_messages = processed.history if not session else None
-        user_message = LLMMessage(role="user", content=processed.input_content)
-        tool_executor = ResourceAwareToolExecutor(self.context, workspace)
-
-        # AG-UI client-side tools are first-class tools in the run config,
-        # but their execution happens on the client and is resumed via interrupt flow.
-        for tool_def in processed.llm_tools:
-            try:
-                tool_executor.register_client_tool(tool_def)
-            except Exception as e:
-                logger.warning(f"Invalid AG-UI tool definition ignored: {e}")
+        history_messages = adapted.history
+        user_message = LLMMessage(role="user", content=adapted.input_content)
 
         pipeline_manager = AgentPipelineManager(
             system_message=system_message,
@@ -940,6 +1221,7 @@ class AgentService(ResourceImplementationService):
                 actor=self.context.actor,
                 workspace=runtime_workspace
             )
+            model_context_window = self._resolve_model_context_window(module_context.version.attributes)
 
             run_config = LLMRunConfig(
                 model=module_context.version.name,
@@ -947,7 +1229,7 @@ class AgentService(ResourceImplementationService):
                 top_p=agent_config.model_params.top_p,
                 presence_penalty=agent_config.model_params.presence_penalty,
                 frequency_penalty=agent_config.model_params.frequency_penalty,
-                # max_context_window=llm_attributes.get("context_window", 4096),
+                max_context_window=model_context_window,
                 max_tokens=agent_config.io_config.max_response_tokens,
                 enable_thinking=agent_config.io_config.enable_deep_thinking,
                 thinking_budget=agent_config.io_config.max_thinking_tokens,

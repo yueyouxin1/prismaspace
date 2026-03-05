@@ -1,6 +1,6 @@
 # tests/engine/model/llm/test_llm_engine_service.py
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from app.engine.model.llm import LLMEngineService, LLMProviderConfig
 from app.engine.model.llm.base import BaseLLMClient, LLMEngineError, LLMProviderNotFoundError 
@@ -18,16 +18,14 @@ class MockLLMClient(BaseLLMClient):
         await self.generate_mock(run_config, messages, callbacks)
 
 
-async def test_engine_selects_correct_client(mocker, mock_openai_provider_config, mock_stream_run_config, mock_messages):
+async def test_engine_selects_correct_client(monkeypatch, mock_openai_provider_config, mock_stream_run_config, mock_messages):
     """测试引擎是否能根据 client_name 正确选择和实例化客户端。"""
     # 1. 设置
     engine = LLMEngineService()
     # 使用 mocker 替换掉 _get_client 内部的客户端实例化逻辑，返回我们的 MockLLMClient
     mock_client_instance = MockLLMClient(mock_openai_provider_config)
-    mocker.patch(
-        "app.engine.model.llm.main.LLMEngineService._get_client",
-        return_value=mock_client_instance
-    )
+    get_client_mock = Mock(return_value=mock_client_instance)
+    monkeypatch.setattr(engine, "_get_client", get_client_mock)
     
     # 2. 执行
     callbacks = AsyncMock()
@@ -40,7 +38,7 @@ async def test_engine_selects_correct_client(mocker, mock_openai_provider_config
 
     # 3. 断言
     # 验证 _get_client 被正确调用
-    engine._get_client.assert_called_once_with(mock_openai_provider_config)
+    get_client_mock.assert_called_once_with(mock_openai_provider_config)
     # 验证模拟客户端的 generate 方法被调用，证明调度成功
     mock_client_instance.generate_mock.assert_called_once()
 
@@ -64,7 +62,7 @@ async def test_engine_handles_unknown_provider(mock_stream_run_config, mock_mess
         )
 
 
-async def test_engine_propagates_client_errors(mocker, mock_openai_provider_config, mock_stream_run_config, mock_messages): # <-- 注入 fixtures
+async def test_engine_propagates_client_errors(monkeypatch, mock_openai_provider_config, mock_stream_run_config, mock_messages): # <-- 注入 fixtures
     """测试如果客户端在执行中抛出异常，引擎是否会捕获并报告它。"""
     # 1. 设置
     engine = LLMEngineService()
@@ -72,10 +70,8 @@ async def test_engine_propagates_client_errors(mocker, mock_openai_provider_conf
     # 让模拟的 generate 方法抛出一个预期的异常
     test_exception = LLMEngineError("Client failed")
     mock_client_instance.generate_mock.side_effect = test_exception
-    mocker.patch(
-        "app.engine.model.llm.main.LLMEngineService._get_client",
-        return_value=mock_client_instance
-    )
+    get_client_mock = Mock(return_value=mock_client_instance)
+    monkeypatch.setattr(engine, "_get_client", get_client_mock)
     callbacks = AsyncMock()
     
     # 2. 执行 & 断言
@@ -94,3 +90,35 @@ async def test_engine_propagates_client_errors(mocker, mock_openai_provider_conf
     assert "Client failed" in str(callbacks.on_error.call_args[0][0])
     
 # [*** 结束修复 ***]
+
+
+async def test_engine_uses_context_manager_with_reserved_budget(
+    monkeypatch,
+    mock_openai_provider_config,
+    mock_stream_run_config,
+    mock_messages,
+):
+    engine = LLMEngineService()
+    mock_client_instance = MockLLMClient(mock_openai_provider_config)
+    get_client_mock = Mock(return_value=mock_client_instance)
+    monkeypatch.setattr(engine, "_get_client", get_client_mock)
+    manage_mock = Mock(return_value=mock_messages)
+    monkeypatch.setattr(engine.context_manager, "manage", manage_mock)
+
+    run_config = mock_stream_run_config.model_copy(
+        update={"max_context_window": 4096, "max_tokens": 1500}
+    )
+    await engine.run(
+        provider_config=mock_openai_provider_config,
+        run_config=run_config,
+        messages=mock_messages,
+        callbacks=AsyncMock(),
+    )
+
+    manage_mock.assert_called_once_with(
+        messages=mock_messages,
+        provider=mock_openai_provider_config.client_name,
+        model=run_config.model,
+        max_context_tokens=4096,
+        reserve_tokens=1500,
+    )

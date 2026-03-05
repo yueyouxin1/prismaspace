@@ -70,7 +70,7 @@ async def test_execute_agent_route_outputs_ag_ui_events(monkeypatch):
         def __init__(self, context):
             self.context = context
 
-        async def execute(self, instance_uuid, run_input, actor):
+        async def sync_execute(self, instance_uuid, run_input, actor):
             return SimpleNamespace(
                 thread_id=run_input.thread_id,
                 run_id=run_input.run_id,

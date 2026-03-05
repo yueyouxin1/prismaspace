@@ -6,6 +6,8 @@ from typing import Literal, Union, Dict, List, Any, Optional
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig
 from app.engine.model.llm import LLMMessage
+from app.schemas.common import ExecutionRequest, ExecutionResponse
+from app.schemas.protocol import RunAgentInputExt, RunEventsResponse
 
 # ==============================================================================
 # 1. 配置子模型 (Sub-Configuration Models)
@@ -142,3 +144,24 @@ class AgentUpdate(AgentSchema, InstanceUpdate):
 class AgentRead(InstanceRead, AgentSchema):
     model_config = ConfigDict(from_attributes=True)
 
+
+# ==============================================================================
+# 4. Execution Schemas
+# ==============================================================================
+
+class AgentExecutionRequest(ExecutionRequest):
+    """
+    统一资源执行端点下的 Agent 阻塞执行请求。
+    使用 AG-UI 协议输入作为 inputs 载荷，不改变既有字段契约。
+    """
+
+    inputs: RunAgentInputExt = Field(..., description="AG-UI run input payload.")
+
+
+class AgentExecutionResponse(ExecutionResponse):
+    """
+    统一资源执行端点下的 Agent 阻塞执行响应。
+    data 字段承载 AG-UI RunEventsResponse。
+    """
+
+    data: RunEventsResponse

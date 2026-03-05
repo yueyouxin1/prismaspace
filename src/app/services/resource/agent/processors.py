@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 
 from app.core.context import AppContext
 from app.models import User, Workspace, ResourceRef
-from app.models.interaction.chat import ChatMessage
+from app.models.interaction.chat import ChatMessage, MessageRole
 from app.models.resource.agent import AgentMemoryVar, AgentContextSummary
 from app.models.resource.tool import Tool
 from app.engine.model.llm import LLMMessage, LLMTool, LLMToolFunction
 from app.engine.agent import BaseToolExecutor, ToolExecutionInterrupt
 from app.schemas.resource.agent.agent_schemas import AgentConfig, AgentRAGConfig, DeepMemoryConfig
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig, KnowledgeBaseExecutionRequest, KnowledgeBaseExecutionParams, SearchResultChunk
-from app.schemas.resource.execution_schemas import AnyExecutionRequest
+from app.schemas.resource.execution_schemas import GenericExecutionRequest
 from app.services.exceptions import ServiceException, NotFoundError
 from app.services.resource.agent.message_content import chat_message_to_text
 
@@ -201,7 +201,7 @@ class ResourceAwareToolExecutor(BaseToolExecutor):
         return {"error": f"Tool '{tool_name}' not found."}
 
     async def _execute_remote_resource(self, tool_name: str, instance_uuid: str, args: Dict[str, Any]) -> Any:
-        request = AnyExecutionRequest(inputs=args)
+        request = GenericExecutionRequest(inputs=args)
         try:
             logger.info(f"[ToolExecutor] Calling remote resource: {tool_name} ({instance_uuid})")
             
@@ -384,6 +384,166 @@ class MemoryVarSkillsProcessor(BaseSkillProcessor):
 # 4. Context Processors (Pipeline Nodes)
 # ==============================================================================
 
+class CustomHistoryMergeProcessor(BaseContextProcessor):
+    """
+    将调用侧提供的自定义历史增量追加到会话历史后面。
+    该职责独立于 ShortContextProcessor，避免职责耦合。
+    """
+    def __init__(self, custom_history: Optional[List[LLMMessage]] = None):
+        self.custom_history = list(custom_history or [])
+
+    async def process(self, ctx: AgentPipelineContext) -> None:
+        if not self.custom_history:
+            return
+        if not ctx.history:
+            ctx.history = list(self.custom_history)
+            return
+        ctx.history.extend(self.custom_history)
+
+
+class ToolChainAlignmentProcessor(BaseContextProcessor):
+    """
+    对齐历史中的工具链消息序列，确保发送给模型的上下文满足严格约束：
+    1. tool 消息必须对应前序 assistant.tool_calls 的 tool_call_id
+    2. assistant.tool_calls 只保留已回填结果的调用，并按声明顺序对齐 tool 消息
+    3. 不合法片段会被降级或剔除，避免底层 provider 报错
+    """
+
+    @staticmethod
+    def _extract_tool_call_id(tool_call: Any) -> str:
+        if not isinstance(tool_call, dict):
+            return ""
+        tool_call_id = tool_call.get("id")
+        return tool_call_id.strip() if isinstance(tool_call_id, str) else ""
+
+    @staticmethod
+    def _assistant_content_exists(message: LLMMessage) -> bool:
+        if isinstance(message.content, str):
+            return bool(message.content.strip())
+        if isinstance(message.content, list):
+            return len(message.content) > 0
+        return False
+
+    async def process(self, ctx: AgentPipelineContext) -> None:
+        if not ctx.history:
+            return
+
+        normalized: List[LLMMessage] = []
+        pending_assistant: Optional[LLMMessage] = None
+        pending_call_order: List[str] = []
+        pending_call_map: Dict[str, Dict[str, Any]] = {}
+        pending_remaining: Set[str] = set()
+        pending_tool_messages: Dict[str, LLMMessage] = {}
+
+        def flush_pending() -> None:
+            nonlocal pending_assistant
+            nonlocal pending_call_order
+            nonlocal pending_call_map
+            nonlocal pending_remaining
+            nonlocal pending_tool_messages
+
+            if pending_assistant is None:
+                return
+
+            answered_order = [
+                tool_call_id
+                for tool_call_id in pending_call_order
+                if tool_call_id in pending_tool_messages
+            ]
+            unresolved_call_ids = [
+                tool_call_id
+                for tool_call_id in pending_call_order
+                if tool_call_id not in pending_tool_messages
+            ]
+
+            assistant_to_emit = pending_assistant.model_copy(deep=True)
+            assistant_to_emit.tool_calls = (
+                [pending_call_map[tool_call_id] for tool_call_id in answered_order]
+                if answered_order
+                else None
+            )
+            if assistant_to_emit.tool_calls or self._assistant_content_exists(assistant_to_emit):
+                normalized.append(assistant_to_emit)
+            normalized.extend(
+                pending_tool_messages[tool_call_id] for tool_call_id in answered_order
+            )
+
+            if unresolved_call_ids:
+                logger.warning(
+                    "[ToolChainAlign] Incomplete tool chain; dropping unresolved tool calls: %s",
+                    ", ".join(unresolved_call_ids),
+                )
+
+            pending_assistant = None
+            pending_call_order = []
+            pending_call_map = {}
+            pending_remaining = set()
+            pending_tool_messages = {}
+
+        for message in ctx.history:
+            role = message.role
+
+            if role == "assistant" and message.tool_calls:
+                if pending_assistant is not None:
+                    flush_pending()
+
+                assistant_copy = message.model_copy(deep=True)
+                call_order: List[str] = []
+                call_map: Dict[str, Dict[str, Any]] = {}
+                for call in assistant_copy.tool_calls or []:
+                    tool_call_id = self._extract_tool_call_id(call)
+                    if not tool_call_id or tool_call_id in call_map:
+                        continue
+                    call_order.append(tool_call_id)
+                    call_map[tool_call_id] = call
+
+                if not call_order:
+                    assistant_copy.tool_calls = None
+                    if self._assistant_content_exists(assistant_copy):
+                        normalized.append(assistant_copy)
+                    continue
+
+                pending_assistant = assistant_copy
+                pending_call_order = call_order
+                pending_call_map = call_map
+                pending_remaining = set(call_order)
+                pending_tool_messages = {}
+                continue
+
+            if role == "tool":
+                tool_call_id = message.tool_call_id.strip() if isinstance(message.tool_call_id, str) else ""
+                if pending_assistant is None:
+                    logger.warning("[ToolChainAlign] Dropping tool message without active assistant tool call block.")
+                    continue
+                if not tool_call_id or tool_call_id not in pending_remaining:
+                    logger.warning(
+                        "[ToolChainAlign] Dropping tool message with unmatched tool_call_id '%s'.",
+                        tool_call_id or "<empty>",
+                    )
+                    continue
+                if tool_call_id in pending_tool_messages:
+                    logger.warning(
+                        "[ToolChainAlign] Dropping duplicate tool message for tool_call_id '%s'.",
+                        tool_call_id,
+                    )
+                    continue
+
+                pending_tool_messages[tool_call_id] = message
+                pending_remaining.remove(tool_call_id)
+                if not pending_remaining:
+                    flush_pending()
+                continue
+
+            if pending_assistant is not None:
+                flush_pending()
+            normalized.append(message)
+
+        if pending_assistant is not None:
+            flush_pending()
+
+        ctx.history = normalized
+
+
 class ShortContextProcessor(BaseContextProcessor):
     def __init__(
         self,
@@ -449,6 +609,10 @@ class ShortContextProcessor(BaseContextProcessor):
         for m in recent_msgs:
             if m.trace_id:
                 trace_ids.add(m.trace_id)
+
+            if m.role == MessageRole.ACTIVITY:
+                # Activity is a frontend-only channel and must not pollute model context.
+                continue
 
             role_value = m.role.value if m.role.value in {"system", "user", "assistant", "tool"} else "system"
             content_value = chat_message_to_text(m)
@@ -842,7 +1006,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
                 
                 if recalled_turns:
                     blocks = []
-                    for turn in turns:
+                    for turn in recalled_turns:
                         if not turn: continue
                         trace_id = turn[0].trace_id
                         if trace_id:

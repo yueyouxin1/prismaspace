@@ -1,7 +1,7 @@
 # app/constants/service_module_constants.py
 
 from .permission_constants import SERVICE_MODULE_ROOT_PERM
-from app.models import ServiceModuleStatus
+from app.models import ActionPermissionType, ServiceModuleStatus
 
 SERVICE_MODULE_TYPES_DATA = [
     {'name': 'llm', 'label': '语言模型'},
@@ -22,7 +22,10 @@ SERVICE_MODULES_DATA = [
                 'version_tag': '2025-09-11',
                 'status': ServiceModuleStatus.AVAILABLE,
                 'attributes': {
-                    'max_context_tokens': 1000000
+                    'type': 'llm',
+                    'client_name': 'dashscope',
+                    'context_window': 1000000,
+                    'max_output_tokens': 8192,
                 }
             }
         ],
@@ -38,7 +41,10 @@ SERVICE_MODULES_DATA = [
                 'version_tag': '2024-05-13',
                 'status': ServiceModuleStatus.AVAILABLE,
                 'attributes': {
-                    'max_tokens': 8192
+                    'type': 'llm',
+                    'client_name': 'openai',
+                    'context_window': 128000,
+                    'max_output_tokens': 8192,
                 }
             }
         ],
@@ -54,8 +60,11 @@ SERVICE_MODULES_DATA = [
                 'version_tag': '1.0.0',
                 'status': ServiceModuleStatus.AVAILABLE,
                 'attributes': {
+                    'type': 'embedding',
+                    'client_name': 'dashscope',
                     'dimensions': 1536, 
-                    'max_tokens': 8192
+                    'max_batch_size': 16,
+                    'max_batch_tokens': 8192,
                 }
             }
         ],

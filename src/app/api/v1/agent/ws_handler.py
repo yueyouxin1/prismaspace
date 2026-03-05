@@ -4,6 +4,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
+from ag_ui.core import EventType, RunErrorEvent
 
 from app.api.dependencies.ws_auth import AuthContext
 from app.core.context import AppContext
@@ -176,15 +177,15 @@ class AgentSessionHandler:
             pass
 
     async def _send_run_error(self, run_id: str, thread_id: str, code: str, message: str):
-        await self._send_json(
-            {
-                "type": "RUN_ERROR",
-                "threadId": thread_id,
-                "runId": run_id,
-                "code": code,
-                "message": message,
-                "retriable": False,
-            }
+        await self._send_event(
+            RunErrorEvent(
+                type=EventType.RUN_ERROR,
+                threadId=thread_id,
+                runId=run_id,
+                code=code,
+                message=message,
+                retriable=False,
+            )
         )
 
     @staticmethod

@@ -2,10 +2,32 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 from app.engine.model.llm import LLMMessage, LLMTool, LLMToolFunction
-from app.schemas.protocol import AgUiMessage, AgUiTool, JsonValue, RunAgentInputExt
+from app.schemas.protocol import AgUiContext, AgUiMessage, AgUiTool, JsonValue, RunAgentInputExt
 
 
 class AgUiNormalizer:
+    def agui_context_to_llm_messages(self, context_items: List[AgUiContext]) -> List[LLMMessage]:
+        if not context_items:
+            return []
+
+        normalized_context: List[Dict[str, str]] = []
+        for item in context_items:
+            description = str(getattr(item, "description", "") or "").strip()
+            value = str(getattr(item, "value", "") or "").strip()
+            if not description and not value:
+                continue
+            normalized_context.append({"description": description, "value": value})
+
+        if not normalized_context:
+            return []
+
+        return [
+            LLMMessage(
+                role="system",
+                content=f"[CONTEXT]\n{json.dumps(normalized_context, ensure_ascii=False)}",
+            )
+        ]
+
     def agui_messages_to_query_and_history(
         self,
         messages: List[AgUiMessage],
@@ -45,24 +67,33 @@ class AgUiNormalizer:
                     tool_call.model_dump(mode="json", by_alias=True, exclude_none=True)
                     for tool_call in message.tool_calls
                 ]
-            return LLMMessage(role="assistant", content=message.content, tool_calls=tool_calls)
+            return LLMMessage(
+                role="assistant",
+                content=message.content,
+                tool_calls=tool_calls,
+                encrypted_value=getattr(message, "encrypted_value", None),
+            )
         if role == "tool":
             return LLMMessage(
                 role="tool",
                 content=self._agui_to_content_text(message.content),
                 tool_call_id=message.tool_call_id,
+                encrypted_value=getattr(message, "encrypted_value", None),
             )
         if role == "reasoning":
             reasoning = self._agui_to_content_text(message.content).strip()
-            if not reasoning:
+            encrypted_value = str(getattr(message, "encrypted_value", "") or "").strip()
+            if not reasoning and not encrypted_value:
                 return None
+            if encrypted_value:
+                if reasoning:
+                    reasoning = f"{reasoning}\n[ENCRYPTED_VALUE]\n{encrypted_value}"
+                else:
+                    reasoning = f"[ENCRYPTED_VALUE]\n{encrypted_value}"
             return LLMMessage(role="system", content=f"[REASONING]\n{reasoning}")
         if role == "activity":
-            activity_type = str(getattr(message, "activity_type", "activity") or "activity")
-            activity_payload = self._agui_to_content_text(getattr(message, "content", None))
-            if not activity_payload:
-                return None
-            return LLMMessage(role="system", content=f"[ACTIVITY:{activity_type}] {activity_payload}")
+            # AG-UI activity messages are frontend-only and should never be sent to LLM context.
+            return None
         if role in ("developer", "system"):
             return LLMMessage(role="system", content=self._agui_to_content_text(message.content))
         return None
