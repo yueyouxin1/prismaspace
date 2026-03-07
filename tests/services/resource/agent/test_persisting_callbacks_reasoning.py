@@ -5,6 +5,7 @@ from app.engine.model.llm import LLMMessage, LLMToolCall, LLMToolCallChunk, LLMU
 from app.schemas.protocol import RunAgentInputExt
 from app.services.common.llm_capability_provider import UsageAccumulator
 from app.services.resource.agent.agent_service import PersistingAgentCallbacks
+from app.services.resource.agent.types.agent import AgentStreamMessageIds
 from app.utils.async_generator import AsyncGeneratorManager
 
 
@@ -47,6 +48,26 @@ def _build_run_input():
     )
 
 
+def _message_ids() -> AgentStreamMessageIds:
+    return AgentStreamMessageIds(
+        user_message_id="user-msg-1",
+        assistant_message_id="assistant-msg-1",
+        reasoning_message_id="reasoning-msg-1",
+        activity_message_id="activity-msg-1",
+    )
+
+
+def test_callbacks_reject_non_canonical_run_id_source():
+    with pytest.raises(ValueError, match="run_id must match"):
+        PersistingAgentCallbacks(
+            usage_accumulator=UsageAccumulator(),
+            generator_manager=AsyncGeneratorManager(),
+            trace_id="trace-1",
+            run_id="run-x",
+            run_input=_build_run_input(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_reasoning_plaintext_is_persisted_in_assistant_meta():
     session_manager = _FakeSessionManager()
@@ -55,6 +76,7 @@ async def test_reasoning_plaintext_is_persisted_in_assistant_meta():
         generator_manager=AsyncGeneratorManager(),
         session_manager=session_manager,
         trace_id="trace-1",
+        run_id="run-1",
     )
 
     await callbacks.on_agent_finish(
@@ -81,7 +103,9 @@ async def test_interrupt_event_uses_typed_tool_calls_payload():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
+        message_ids=_message_ids(),
     )
 
     pending_call = LLMToolCall(
@@ -105,6 +129,7 @@ async def test_interrupt_event_uses_typed_tool_calls_payload():
             outcome="interrupted",
         )
     )
+    await callbacks.emit_prepared_terminal_event()
 
     run_finished = await generator.get()
     payload = run_finished.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -122,7 +147,9 @@ async def test_cancel_event_is_cancelled_outcome_not_interrupt():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
+        message_ids=_message_ids(),
     )
 
     await callbacks.on_agent_cancel(
@@ -133,6 +160,7 @@ async def test_cancel_event_is_cancelled_outcome_not_interrupt():
             outcome="cancelled",
         )
     )
+    await callbacks.emit_prepared_terminal_event()
 
     run_finished = await generator.get()
     payload = run_finished.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -149,6 +177,7 @@ async def test_step_thought_is_persisted_once_before_tool_result():
         generator_manager=AsyncGeneratorManager(),
         session_manager=session_manager,
         trace_id="trace-1",
+        run_id="run-1",
     )
 
     tool_call = LLMToolCall(
@@ -179,7 +208,9 @@ async def test_finish_emits_reasoning_events_from_result_when_no_chunk_stream():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
+        message_ids=_message_ids(),
     )
 
     await callbacks.on_agent_finish(
@@ -191,6 +222,7 @@ async def test_finish_emits_reasoning_events_from_result_when_no_chunk_stream():
             outcome="completed",
         )
     )
+    await callbacks.emit_prepared_terminal_event()
 
     events = [await generator.get() for _ in range(7)]
     payloads = [event.model_dump(mode="json", by_alias=True, exclude_none=True) for event in events]
@@ -204,6 +236,40 @@ async def test_finish_emits_reasoning_events_from_result_when_no_chunk_stream():
 
 
 @pytest.mark.asyncio
+async def test_finish_defers_run_finished_until_terminal_finalize():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_id="run-1",
+        run_input=_build_run_input(),
+        message_ids=_message_ids(),
+    )
+
+    await callbacks.on_agent_finish(
+        AgentResult(
+            message=LLMMessage(role="assistant", content="final"),
+            steps=[],
+            usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            outcome="completed",
+        )
+    )
+
+    assert callbacks.pending_terminal_event is not None
+    assert callbacks.has_terminal_event is False
+
+    await callbacks.emit_prepared_terminal_event()
+
+    payloads = [
+        (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+        for _ in range(2)
+    ]
+    assert [item["type"] for item in payloads] == ["RUN_FINISHED", "STATE_DELTA"]
+
+
+@pytest.mark.asyncio
 async def test_tool_call_chunk_stream_emits_incremental_args_and_no_duplicate_full_args():
     generator = AsyncGeneratorManager()
     callbacks = PersistingAgentCallbacks(
@@ -211,6 +277,7 @@ async def test_tool_call_chunk_stream_emits_incremental_args_and_no_duplicate_fu
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
     )
 
@@ -260,6 +327,7 @@ async def test_agent_step_emits_step_started_and_finished_events():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
     )
 
     tool_call = LLMToolCall(
@@ -296,6 +364,7 @@ async def test_on_agent_error_closes_open_tool_call_stream():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
     )
 
@@ -330,6 +399,7 @@ async def test_on_agent_start_emits_activity_snapshot_and_tool_activity_deltas()
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
     )
 
@@ -361,6 +431,7 @@ async def test_tool_call_with_encrypted_value_emits_reasoning_encrypted_event():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
     )
 
@@ -398,7 +469,9 @@ async def test_finish_emits_message_level_reasoning_encrypted_event():
         generator_manager=generator,
         session_manager=None,
         trace_id="trace-1",
+        run_id="run-1",
         run_input=_build_run_input(),
+        message_ids=_message_ids(),
     )
 
     await callbacks.on_agent_finish(
@@ -409,6 +482,7 @@ async def test_finish_emits_message_level_reasoning_encrypted_event():
             outcome="completed",
         )
     )
+    await callbacks.emit_prepared_terminal_event()
 
     payloads = [
         (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -420,4 +494,4 @@ async def test_finish_emits_message_level_reasoning_encrypted_event():
         "STATE_DELTA",
     ]
     assert payloads[0]["subtype"] == "message"
-    assert payloads[0]["entityId"] == "assistant-run-1"
+    assert payloads[0]["entityId"] == "assistant-msg-1"

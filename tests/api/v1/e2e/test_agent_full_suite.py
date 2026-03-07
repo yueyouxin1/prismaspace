@@ -548,7 +548,7 @@ class TestAgentFullSuite:
                 "messages": [{"id": "u1", "role": "user", "content": "Remember this"}],
                 "tools": [],
                 "context": [],
-                "forwardedProps": {"sessionUuid": session_uuid},
+                "forwardedProps": {},
             },
             headers=headers
         )
@@ -565,7 +565,7 @@ class TestAgentFullSuite:
         
         calls = arq_pool_mock.enqueue_job.call_args_list
         task_names = [call.args[0] for call in calls]
-        assert 'index_long_term_context_task' in task_names or 'summarize_trace_task' in task_names
+        assert 'index_turn_task' in task_names or 'summarize_turn_task' in task_names
 
         # =========================================================================
         # [关键修复] 等待所有悬挂的后台任务完成

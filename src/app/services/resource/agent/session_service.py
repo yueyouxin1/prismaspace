@@ -39,6 +39,12 @@ class SessionService(BaseService):
         
         return real_count
 
+    async def _sync_turn_count(self, session: ChatSession) -> int:
+        real_count = await self.message_dao.get_active_turn_count(session.id)
+        if session.turn_count != real_count:
+            session.turn_count = real_count
+        return real_count
+
     async def create_session(self, create_data: ChatSessionCreate, actor: User) -> ChatSessionRead:
         """用户创建一个新的会话"""
         instance = await self.instance_dao.get_by_uuid(create_data.agent_instance_uuid)
@@ -142,6 +148,7 @@ class SessionService(BaseService):
         self, 
         session: ChatSession, 
         role: MessageRole, 
+        message_uuid: Optional[str] = None,
         text_content: str = None,
         content_parts: Optional[List[Dict[str, Any]]] = None,
         reasoning_content: Optional[str] = None,
@@ -150,6 +157,8 @@ class SessionService(BaseService):
         content: str = None,
         tool_calls: List[Dict[str, Any]] = None, 
         tool_call_id: str = None,
+        run_id: str = None,
+        turn_id: str = None,
         trace_id: str = None,
         token_count: int = 0,
         meta: Optional[Dict[str, Any]] = None,
@@ -158,6 +167,7 @@ class SessionService(BaseService):
         [Atomic] 持久化消息。
         """
         msg = ChatMessage(
+            uuid=message_uuid,
             session_id=session.id,
             role=role,
             content=text_content if text_content is not None else content,
@@ -169,12 +179,21 @@ class SessionService(BaseService):
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,
             token_count=token_count,
+            run_id=run_id,
+            turn_id=turn_id,
             trace_id=trace_id,
             meta=meta,
         )
-        await self.db.add(msg)
+        if turn_id:
+            existing_turn_ids = await self.message_dao.get_existing_turn_ids(session.id, [turn_id])
+        else:
+            existing_turn_ids = set()
+
+        self.db.add(msg)
 
         session.message_count = ChatSession.message_count + 1
+        if turn_id and turn_id not in existing_turn_ids:
+            session.turn_count = ChatSession.turn_count + 1
         
         session.updated_at = func.now()
 
@@ -194,8 +213,14 @@ class SessionService(BaseService):
                 return
 
             orm_messages = []
+            incoming_turn_ids = {
+                turn_id
+                for turn_id in (data.get("turn_id") for data in messages_data)
+                if isinstance(turn_id, str) and turn_id
+            }
             for data in messages_data:
                 msg = ChatMessage(
+                    uuid=data.get('message_uuid'),
                     session_id=session.id,
                     role=data['role'],
                     content=data.get('text_content') if data.get('text_content') is not None else data.get('content'),
@@ -207,13 +232,26 @@ class SessionService(BaseService):
                     tool_calls=data.get('tool_calls'),
                     tool_call_id=data.get('tool_call_id'),
                     token_count=data.get('token_count', 0),
+                    run_id=data.get('run_id'),
+                    turn_id=data.get('turn_id'),
                     trace_id=data.get('trace_id'),
                     meta=data.get('meta'),
                 )
                 orm_messages.append(msg)
             
+            if incoming_turn_ids:
+                existing_turn_ids = await self.message_dao.get_existing_turn_ids(
+                    session.id,
+                    list(incoming_turn_ids),
+                )
+            else:
+                existing_turn_ids = set()
+
             self.db.add_all(orm_messages)
             session.message_count = ChatSession.message_count + len(orm_messages)
+            new_turn_count = len(incoming_turn_ids - existing_turn_ids)
+            if new_turn_count > 0:
+                session.turn_count = ChatSession.turn_count + new_turn_count
             session.updated_at = func.now()
             
             await self.db.flush()
@@ -238,6 +276,7 @@ class SessionService(BaseService):
         
         # 3. 重置计数器 (配合之前的锯齿优化)
         session.message_count = 0
+        session.turn_count = 0
         await self.db.flush()
 
     async def delete_message(self, message_uuid: str, actor: User, mode: str = "production"):
@@ -254,7 +293,7 @@ class SessionService(BaseService):
             raise PermissionDeniedError("Cannot delete message from this session")
 
         # 2. 捕获关键信息用于级联
-        target_trace_id = msg.trace_id
+        target_turn_id = msg.turn_id
         
         # 3. 删除消息
         if mode == "debug":
@@ -264,14 +303,23 @@ class SessionService(BaseService):
             # msg.deleted_at = func.now() # 如果有此字段
         
         # 4. [级联操作] Summary 共生死
-        # 只要 Trace 中的任何一条消息被删，该 Trace 的摘要即失效
-        if target_trace_id:
-            await self.summary_service.invalid_summary_for_trace(
-                trace_id=target_trace_id, 
+        # 只要 turn 中的任何一条消息被删，该轮摘要即失效
+        if target_turn_id:
+            active_messages_in_turn = await self.message_dao.get_active_message_count_for_turn(
+                msg.session_id,
+                target_turn_id,
+            )
+            await self.summary_service.invalid_summary_for_turn(
+                turn_id=target_turn_id,
+                session_uuid=msg.session.uuid,
+                agent_instance_id=msg.session.agent_instance_id,
+                user_id=msg.session.user_id,
                 mode=mode
             )
+            if active_messages_in_turn == 1:
+                msg.session.turn_count = ChatSession.turn_count - 1
 
-        session.message_count = ChatSession.message_count - 1  
+        msg.session.message_count = ChatSession.message_count - 1  
         await self.db.flush()
 
     async def delete_session(self, session_uuid: str, actor: User):
@@ -284,7 +332,6 @@ class SessionService(BaseService):
 
     async def get_recent_messages(self, session_id: int, limit: int) -> List[ChatMessage]:
         """
-        [Raw Data] 仅获取最近 N 条原始数据库消息。
-        格式化逻辑移交给 ContextBuilderProcessor。
+        [Raw Data] 仅获取最近 N 个业务轮次的原始数据库消息。
         """
         return await self.message_dao.get_messages_by_turns(session_id, turns=limit)

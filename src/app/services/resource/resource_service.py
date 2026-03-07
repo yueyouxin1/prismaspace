@@ -1,5 +1,6 @@
 # app/services/resource/resource_service.py
 
+import logging
 from typing import Dict, List, Any
 from app.core.context import AppContext
 from app.models import User
@@ -18,6 +19,8 @@ from app.schemas.resource.resource_schemas import (
 )
 from .base.base_resource_service import BaseResourceService
 from app.services.exceptions import NotFoundError, ServiceException
+
+logger = logging.getLogger(__name__)
 
 class ResourceService(BaseResourceService):
     def __init__(self, context: AppContext):
@@ -129,6 +132,21 @@ class ResourceService(BaseResourceService):
         resources = await self.dao.get_resources_by_workspace_id(workspace.id)
         return resources
 
+    async def _refresh_tool_schema(self, instance: ResourceInstance, impl_service) -> None:
+        try:
+            tool_def = await impl_service.as_llm_tool(instance)
+        except Exception as exc:
+            logger.warning(
+                "Failed to prebuild tool schema for instance %s (%s): %s",
+                getattr(instance, "uuid", None),
+                getattr(instance, "resource_type", None),
+                exc,
+            )
+            instance.tool_schema = None
+            return
+
+        instance.tool_schema = tool_def.model_dump(mode="json") if tool_def else None
+
     async def _create_resource_in_workspace(self, workspace_uuid: str, resource_data: ResourceCreate, actor: User) -> Resource:
         # 1. 通用逻辑 (权限、验证) - 保持不变
         workspace = await self.workspace_dao.get_by_uuid(workspace_uuid, withs=["user_owner", "team"])
@@ -167,6 +185,8 @@ class ResourceService(BaseResourceService):
             # 某些资源实例在创建时就是发布版本
             new_resource.latest_published_instance = new_instance
 
+        await self.db.flush()
+        await self._refresh_tool_schema(new_instance, impl_service)
         await self.db.flush()
 
         # 5. 序列化需要instance.uuid，re-fetch比refresh更安全
@@ -211,6 +231,13 @@ class ResourceService(BaseResourceService):
                     setattr(resource.workspace_instance, key, value)
 
         # 4. 持久化所有更改
+        if resource.workspace_instance and ("name" in update_dict or "description" in update_dict):
+            full_workspace_instance, impl_service = await self._get_full_instance_and_service(
+                resource.workspace_instance.uuid
+            )
+            full_workspace_instance.name = resource.name
+            full_workspace_instance.description = resource.description
+            await self._refresh_tool_schema(full_workspace_instance, impl_service)
         await self.db.flush()
 
         # 5. 重新查询
@@ -322,6 +349,8 @@ class ResourceService(BaseResourceService):
 
             self.db.add(new_published_instance)
             await self.db.flush()
+            await self._refresh_tool_schema(new_published_instance, impl_service)
+            await self.db.flush()
 
             # 2. 复制依赖关系
             # 将 source_instance 的所有 ResourceRef 复制一份给 new_published_instance
@@ -399,6 +428,7 @@ class ResourceService(BaseResourceService):
             if previous_description != updated_instance.description:
                 updated_instance.resource.description = updated_instance.description
 
+        await self._refresh_tool_schema(updated_instance, service)
         await self.db.flush()
         full_instance = await service.get_by_uuid(updated_instance.uuid)
         if not full_instance:

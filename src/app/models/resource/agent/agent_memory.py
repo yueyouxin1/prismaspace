@@ -100,9 +100,10 @@ class AgentContextSummary(Base):
     scope = Column(Enum(SummaryScope), default=SummaryScope.SESSION, nullable=False, index=True)
     session_uuid = Column(String(36), nullable=True, index=True, comment="如果是 Session 级，必须绑定 Session UUID")
     
-    # 来源溯源 (Traceability)
-    # 记录该摘要是基于哪一轮（或哪几轮）生成的。通常对应触发摘要任务的那个 Trace ID。
-    trace_id = Column(String(36), nullable=False, index=True, comment="该摘要对应的原始对话轮次Trace ID")
+    # 来源溯源
+    run_id = Column(String(36), nullable=False, index=True, comment="平台权威执行 ID")
+    turn_id = Column(String(36), nullable=False, index=True, comment="摘要对应的业务轮次 ID")
+    trace_id = Column(String(36), nullable=True, index=True, comment="可选观测 Trace ID")
     
     # [关键新增] 记录生成此摘要所使用的 LLM 模型版本
     # 用于成本归因、审计以及未来可能的重新生成策略

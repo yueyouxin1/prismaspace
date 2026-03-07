@@ -10,6 +10,7 @@ from .knowledge import (
     garbage_collect_document_task,
     run_periodic_document_gc_task
 )
+from .agent import index_turn_task, summarize_turn_task
 # 2. 导入注册中心
 from ..main import TASK_FUNCTIONS, CRON_JOBS
 
@@ -21,10 +22,12 @@ TASK_FUNCTIONS.extend([
     physical_delete_asset_task,
     update_chunk_task,
     process_document_task, 
-    garbage_collect_document_task
+    garbage_collect_document_task,
+    index_turn_task,
+    summarize_turn_task,
 ])
 
-CRON_JOBS = [
+CRON_JOBS.extend([
     # 配置周期性任务，每天凌晨3点运行
     cron(run_periodic_document_gc_task, hour=3, minute=0)
-]
+])

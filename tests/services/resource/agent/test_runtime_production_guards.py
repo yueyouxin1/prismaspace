@@ -1,0 +1,168 @@
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.engine.agent import AgentResult
+from app.engine.model.llm import LLMMessage, LLMUsage
+from app.schemas.resource.agent.agent_schemas import AgentConfig
+from app.services.resource.agent import agent_service as agent_service_module
+from app.services.resource.agent.agent_service import AgentService
+from app.services.resource.agent.protocol_adapter.base import ProtocolAdaptedRun
+from app.services.resource.agent.types.agent import AgentStreamMessageIds
+from app.utils.async_generator import AsyncGeneratorManager
+
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_background_task_locks_preflight_and_commits_before_terminal_event(monkeypatch):
+    service = object.__new__(AgentService)
+    order: list[str] = []
+    lock_state = {"held": False}
+    captured = {"history": None}
+
+    @asynccontextmanager
+    async def fake_lock(_session_uuid: str):
+        lock_state["held"] = True
+        try:
+            yield
+        finally:
+            lock_state["held"] = False
+
+    class FakePipelineManager:
+        def __init__(self, *, system_message, user_message, history, tool_executor):
+            captured["history"] = history
+            self.user_message = user_message
+            self.tool_executor = tool_executor
+
+        def add_standard_processors(self, **kwargs):
+            return self
+
+        async def build_context(self):
+            assert lock_state["held"] is True
+            return [LLMMessage(role="user", content="hi")]
+
+        async def build_skill(self):
+            assert lock_state["held"] is True
+            return []
+
+    class FakeSpan:
+        def __init__(self):
+            self.attributes = None
+
+        def set_output(self, _result):
+            return None
+
+    class FakeTraceManager:
+        force_trace_id = "trace-1"
+
+        async def __aenter__(self):
+            return FakeSpan()
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    async def fake_preload(_turns: int):
+        assert lock_state["held"] is True
+
+    async def fake_mark_running(*args, **kwargs):
+        return None
+
+    async def fake_mark_finished(*args, **kwargs):
+        order.append("mark_finished")
+
+    async def fake_commit():
+        order.append("db.commit")
+
+    async def fake_emit(self):
+        order.append("emit_terminal")
+
+    monkeypatch.setattr(agent_service_module, "AgentPipelineManager", FakePipelineManager)
+    monkeypatch.setattr(
+        agent_service_module.PersistingAgentCallbacks,
+        "emit_prepared_terminal_event",
+        fake_emit,
+    )
+
+    service._session_lock = fake_lock
+    service.db = SimpleNamespace(
+        refresh=AsyncMock(),
+        commit=AsyncMock(side_effect=fake_commit),
+        rollback=AsyncMock(),
+    )
+    service.context = SimpleNamespace(actor=SimpleNamespace(id=42))
+    service.agent_memory_var_service = SimpleNamespace(
+        get_runtime_object=AsyncMock(return_value={})
+    )
+    service.prompt_template = SimpleNamespace(render=lambda template, variables: template)
+    service.module_service = SimpleNamespace(
+        get_runtime_context=AsyncMock(
+            return_value=SimpleNamespace(
+                version=SimpleNamespace(name="gpt-test", attributes={"context_window": 2048})
+            )
+        )
+    )
+    service.ai_provider = SimpleNamespace(
+        execute_agent_with_billing=AsyncMock(
+            return_value=AgentResult(
+                message=LLMMessage(role="assistant", content="done"),
+                steps=[],
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                outcome="completed",
+            )
+        )
+    )
+    service.execution_ledger_service = SimpleNamespace(
+        mark_running=AsyncMock(side_effect=fake_mark_running),
+        mark_finished=AsyncMock(side_effect=fake_mark_finished),
+    )
+    service._close_owned_runtime_session = AsyncMock()
+
+    session_manager = SimpleNamespace(
+        session=SimpleNamespace(uuid="session-1", turn_count=1),
+        preload_recent_messages=AsyncMock(side_effect=fake_preload),
+        get_recent_messages=AsyncMock(return_value=[]),
+        commit=AsyncMock(),
+        buffer_message=lambda **kwargs: None,
+        dispatch_post_commit_jobs=AsyncMock(),
+        clear_post_commit_jobs=lambda: None,
+    )
+
+    adapted = ProtocolAdaptedRun(
+        input_content="hello",
+        thread_id="session-1",
+        client_tools=[],
+        custom_history=[LLMMessage(role="system", content="custom-history")],
+        resume_messages=[],
+        has_custom_history=True,
+    )
+
+    await service._run_agent_background_task(
+        agent_config=AgentConfig(),
+        llm_module_version=SimpleNamespace(id=1),
+        runtime_workspace=SimpleNamespace(id=9),
+        trace_manager=FakeTraceManager(),
+        generator_manager=AsyncGeneratorManager(),
+        execution=SimpleNamespace(run_id="run-1"),
+        turn_id="turn-1",
+        session_manager=session_manager,
+        run_input=None,
+        message_ids=AgentStreamMessageIds(
+            user_message_id="user-1",
+            assistant_message_id="assistant-1",
+            reasoning_message_id="reasoning-1",
+            activity_message_id="activity-1",
+        ),
+        dependencies=[],
+        adapted=adapted,
+        tool_executor=SimpleNamespace(),
+        agent_instance=SimpleNamespace(version_id=7, system_prompt="system"),
+    )
+
+    session_manager.preload_recent_messages.assert_awaited_once()
+    session_manager.commit.assert_awaited_once()
+    session_manager.dispatch_post_commit_jobs.assert_awaited_once()
+    assert captured["history"][0].content == "custom-history"
+    assert order == ["mark_finished", "db.commit", "emit_terminal"]

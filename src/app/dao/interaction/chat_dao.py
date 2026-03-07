@@ -31,6 +31,9 @@ class ChatMessageDao(BaseDao[ChatMessage]):
     def __init__(self, db_session: AsyncSession):
         super().__init__(ChatMessage, db_session)
 
+    async def get_by_uuid(self, uuid: str, withs: list = None) -> Optional[ChatMessage]:
+        return await self.get_one(where={"uuid": uuid}, withs=withs)
+
     async def get_active_count(self, session_id: int) -> int:
         """
         [Source of Truth] 获取当前会话的有效消息总数。
@@ -42,6 +45,56 @@ class ChatMessageDao(BaseDao[ChatMessage]):
             .where(
                 ChatMessage.session_id == session_id,
                 ChatMessage.is_deleted == False  # 核心：排除软删除
+            )
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_active_turn_count(self, session_id: int) -> int:
+        stmt = (
+            select(func.count(func.distinct(ChatMessage.turn_id)))
+            .select_from(ChatMessage)
+            .where(
+                ChatMessage.session_id == session_id,
+                ChatMessage.is_deleted == False,
+                ChatMessage.turn_id.is_not(None),
+            )
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_existing_turn_ids(self, session_id: int, turn_ids: list[str]) -> set[str]:
+        normalized_turn_ids = [turn_id for turn_id in turn_ids if isinstance(turn_id, str) and turn_id]
+        if not normalized_turn_ids:
+            return set()
+
+        stmt = (
+            select(ChatMessage.turn_id)
+            .where(
+                ChatMessage.session_id == session_id,
+                ChatMessage.is_deleted == False,
+                ChatMessage.turn_id.in_(normalized_turn_ids),
+            )
+            .group_by(ChatMessage.turn_id)
+        )
+        result = await self.db_session.execute(stmt)
+        return {
+            turn_id
+            for turn_id in result.scalars().all()
+            if isinstance(turn_id, str) and turn_id
+        }
+
+    async def get_active_message_count_for_turn(self, session_id: int, turn_id: str) -> int:
+        if not isinstance(turn_id, str) or not turn_id:
+            return 0
+
+        stmt = (
+            select(func.count())
+            .select_from(ChatMessage)
+            .where(
+                ChatMessage.session_id == session_id,
+                ChatMessage.is_deleted == False,
+                ChatMessage.turn_id == turn_id,
             )
         )
         result = await self.db_session.execute(stmt)
@@ -70,37 +123,29 @@ class ChatMessageDao(BaseDao[ChatMessage]):
 
     async def get_messages_by_turns(self, session_id: int, turns: int) -> List[ChatMessage]:
         """
-        [Smart Retrieval] 获取最近 N 轮（基于 Trace ID 分组）的消息。
+        [Smart Retrieval] 获取最近 N 轮（基于 turn_id 分组）的消息。
         """
-        # 1. 子查询：找出最近的 N 个 trace_id
-        # 注意：我们需要去重，并按 ID 倒序（最近的 trace_id）
+        # 1. 子查询：找出最近的 N 个 turn_id
         subquery = (
-            select(ChatMessage.trace_id)
+            select(ChatMessage.turn_id)
             .where(
                 ChatMessage.session_id == session_id,
                 ChatMessage.is_deleted == False,
-                ChatMessage.trace_id.is_not(None)
+                ChatMessage.turn_id.is_not(None)
             )
-            .group_by(ChatMessage.trace_id)
-            # 我们假设 trace_id 对应的第一条消息ID越大，时间越近。
-            # 或者更简单的：MAX(id) DESC
+            .group_by(ChatMessage.turn_id)
             .order_by(func.max(ChatMessage.id).desc())
             .limit(turns)
         ).scalar_subquery()
-
-        # 2. 主查询：获取这些 trace_id 下的所有消息 + 那些没有 trace_id 的消息？
-        # 实际上，现在的架构保证每条消息都有 trace_id。
-        # 如果有没 trace_id 的（比如旧数据），我们可以视作独立轮次。
-        # 为简单起见，我们假设所有有效交互都有 trace_id。
         
         stmt = (
             select(ChatMessage)
             .where(
                 ChatMessage.session_id == session_id,
                 ChatMessage.is_deleted == False,
-                ChatMessage.trace_id.in_(subquery)
+                ChatMessage.turn_id.in_(subquery)
             )
-            .order_by(ChatMessage.id.asc()) # 最终按时间正序返回
+            .order_by(ChatMessage.id.asc())
         )
         
         result = await self.db_session.execute(stmt)

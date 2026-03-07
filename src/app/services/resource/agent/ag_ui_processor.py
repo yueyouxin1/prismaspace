@@ -10,9 +10,10 @@ from app.services.resource.agent.protocol_adapter import AgUiProtocolAdapter
 @dataclass
 class AgUiProcessedRun:
     input_content: str | List[Dict[str, JsonValue]]
-    history: List[LLMMessage]
+    custom_history: List[LLMMessage]
+    resume_messages: List[LLMMessage]
     llm_tools: List[LLMTool]
-    session_uuid: str
+    thread_id: str
 
 
 class AgUiProcessor:
@@ -23,7 +24,8 @@ class AgUiProcessor:
         adapted = self.adapter.adapt(run_input)
         return AgUiProcessedRun(
             input_content=adapted.input_content,
-            history=adapted.history,
+            custom_history=adapted.custom_history,
+            resume_messages=adapted.resume_messages,
             llm_tools=adapted.client_tools,
-            session_uuid=adapted.session_uuid,
+            thread_id=adapted.thread_id,
         )

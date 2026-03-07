@@ -70,6 +70,11 @@ class TestGenericResourceLifecycle:
         type_map = {"tool": Tool, "knowledge": KnowledgeBase, "tenantdb": TenantDB}
         expected_type = type_map.get(resource_type)
         assert isinstance(resource.workspace_instance, expected_type), f"Instance should be of type {expected_type}"
+        if resource_type == "tool":
+            workspace_instance = await ResourceInstanceDao(db_session).get_by_uuid(resource.workspace_instance.uuid)
+            assert workspace_instance is not None
+            assert workspace_instance.tool_schema is not None
+            assert workspace_instance.tool_schema["function"]["name"].startswith("call_")
 
     async def test_list_resources_in_workspace(self, client: AsyncClient, auth_headers_factory: Callable, registered_user_with_pro: UserContext, created_resource: Resource):
         """[参数化] 验证可以成功列出工作空间中的资源。"""
@@ -203,6 +208,9 @@ class TestGenericResourceMetadata:
         updated_instance = await ResourceInstanceDao(db_session).get_by_uuid(updated_resource.workspace_instance.uuid)
         assert updated_instance is not None
         assert updated_instance.name == payload["name"]
+        if updated_instance.resource_type == "tool":
+            assert updated_instance.tool_schema is not None
+            assert updated_instance.tool_schema["function"]["description"] == payload["description"]
 
 class TestGenericInstanceVersioning:
     """[通用] 测试版本管理的核心流程：发布、归档。"""
@@ -242,6 +250,10 @@ class TestGenericInstanceVersioning:
         assert v2_instance.name == "Version 1.1 Name" # 验证内容已更新
         assert v1_instance.status == VersionStatus.PUBLISHED
         assert v1_instance.name != "Version 1.1 Name" # 验证旧版本内容未变
+        if v1_instance.resource_type == "tool":
+            assert v1_instance.tool_schema is not None
+            assert v2_instance.tool_schema is not None
+            assert v2_instance.tool_schema["function"]["description"] == v2_instance.description
 
         # --- 5. 归档 v1.1.0 ---
         res_v3 = await client.post(f"/api/v1/instances/{v2_uuid}/archive", json={}, headers=headers)

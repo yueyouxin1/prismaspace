@@ -35,6 +35,7 @@ class ChatSession(Base):
 
     # 性能数据
     message_count = Column(Integer, default=0, nullable=False, comment="正常消息数量")
+    turn_count = Column(Integer, default=0, nullable=False, comment="有效业务轮次数量")
 
     # 状态
     is_archived = Column(Boolean, default=False, index=True, comment="会话是否已归档(软删除)")
@@ -78,8 +79,10 @@ class ChatMessage(Base):
     # 性能数据
     token_count = Column(Integer, default=0, comment="估算的 Token 数量")
     
-    # 溯源
-    trace_id = Column(String(36), nullable=True, index=True, comment="关联的 Trace ID")
+    # 业务/观测锚点
+    run_id = Column(String(36), nullable=True, index=True, comment="平台权威执行 ID")
+    turn_id = Column(String(36), nullable=True, index=True, comment="业务轮次 ID")
+    trace_id = Column(String(36), nullable=True, index=True, comment="关联的可选 Trace ID")
     
     # [关键新增] 消息级软删除，用于生产环境“清空上下文”
     is_deleted = Column(Boolean, default=False, index=True)

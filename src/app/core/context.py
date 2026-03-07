@@ -1,7 +1,7 @@
 # src/app/core/context.py
 
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
+from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from arq.connections import ArqRedis
 
@@ -22,6 +22,7 @@ class AppContext(BaseModel):
 
     # 核心数据库会话
     db: AsyncSession
+    db_session_factory: Any = None
     
     # [KEY CHANGE] 完整的、可选的认证上下文
     # 对于需要认证的路由，它将是一个 AuthContext 实例；对于公共路由，它将是 None。

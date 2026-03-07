@@ -49,7 +49,7 @@ class AgentPipelineContext:
     user_message: LLMMessage = field(default_factory=lambda: LLMMessage(role="user", content=""))
     
     # 状态追踪
-    exclude_trace_ids: Set[str] = field(default_factory=set)
+    exclude_turn_ids: Set[str] = field(default_factory=set)
 
     def get_query_text(self) -> str:
         """从 user_message 中提取纯文本用于向量检索，兼容多模态结构。"""
@@ -239,6 +239,22 @@ class DependencySkillsProcessor(BaseSkillProcessor):
         from app.services.resource.resource_service import ResourceService
         self.resource_service = ResourceService(context)
 
+    async def _resolve_tool_definition(self, dep: ResourceRef, instance_uuid: str) -> Optional[LLMTool]:
+        cached_schema = getattr(dep.target_instance, "tool_schema", None)
+        if cached_schema:
+            try:
+                return LLMTool.model_validate(cached_schema).model_copy(deep=True)
+            except Exception as exc:
+                logger.warning(
+                    "Invalid cached tool schema for dependency %s: %s",
+                    instance_uuid,
+                    exc,
+                )
+
+        full_instance, target_service = await self.resource_service._get_full_instance_and_service(instance_uuid)
+        tool_def = await target_service.as_llm_tool(full_instance)
+        return tool_def.model_copy(deep=True) if tool_def else None
+
     async def process(self, tool_executor: BaseToolExecutor) -> None:
         for dep in self.dependencies:
             instance = dep.target_instance
@@ -253,17 +269,14 @@ class DependencySkillsProcessor(BaseSkillProcessor):
             )
 
             try:
-                # 依赖关系里拿到的是轻量实例，先按 uuid 加载 full typed instance。
-                full_instance, target_service = await self.resource_service._get_full_instance_and_service(instance_uuid)
-                # 转换 Tool 定义
-                tool_def = await target_service.as_llm_tool(full_instance)
+                tool_def = await self._resolve_tool_definition(dep, instance_uuid)
                 if tool_def:
                     # 使用引用中的 alias 重命名工具 (如果存在)
                     if dep.alias:
                         tool_def.function.name = dep.alias
                     
                     # 注册到 Executor (ResourceAwareToolExecutor 会处理远程调用逻辑)
-                    tool_executor.register_resource_instance(tool_def, full_instance.uuid)
+                    tool_executor.register_resource_instance(tool_def, instance_uuid)
             except Exception as e:
                 logger.warning(f"Failed to load tool dependency {display_name}: {e}")
 
@@ -285,7 +298,11 @@ class DeepMemorySkillsProcessor(BaseSkillProcessor):
 
         # 定义本地函数
         async def expand_context_fn(context_id: str):
-            msgs = await self.long_term_service.retrieve_by_trace_id_direct(context_id)
+            msgs = await self.long_term_service.retrieve_by_turn_id_direct(
+                context_id,
+                session_uuid=self.session_manager.session.uuid,
+                agent_instance_id=self.session_manager.agent_instance.id,
+            )
             if not msgs:
                 return "Context not found or expired."
             return "\n".join([f"{m.role.value}: {chat_message_to_text(m)}" for m in msgs])
@@ -555,60 +572,55 @@ class ShortContextProcessor(BaseContextProcessor):
     ):
         self.context = context
         self.session_manager = session_manager
-        # 将 "轮次(Turns)" 转换为 "消息数(Messages)"，通常 1 Turn = 2 Msgs (User+Assistant)
-        # 这里为了精确控制，我们直接按 Message 数量计算
-        self.max_msgs = max_turns * 2 
-        self.min_msgs = max(2, int(self.max_msgs * min_turns_ratio))
+        self.max_turns = max_turns
+        self.min_turns_ratio = min_turns_ratio
+        self.min_turns = max(1, int(max_turns * min_turns_ratio)) if max_turns > 0 else 0
+
+    @classmethod
+    def compute_fetch_limit(cls, total_turns: int, max_turns: int, min_turns_ratio: float = 0.5) -> int:
+        min_turns = max(1, int(max_turns * min_turns_ratio)) if max_turns > 0 else 0
+
+        if total_turns <= 0 or max_turns <= 0:
+            return 0
+
+        if total_turns <= max_turns:
+            return total_turns
+
+        cycle_len = max_turns - min_turns
+        if cycle_len <= 0:
+            return min(total_turns, max_turns)
+
+        overflow = total_turns - min_turns
+        remainder = overflow % cycle_len
+        return min(min_turns + remainder, max_turns)
 
     async def process(self, ctx: AgentPipelineContext) -> None:
         if not self.session_manager or not self.session_manager.session:
             return
 
         session = self.session_manager.session
-        total_count = session.message_count
+        total_turns = getattr(session, "turn_count", 0)
 
         # --- [核心算法：锯齿窗口计算] ---
-        fetch_limit = 0
-        
-        if total_count <= self.max_msgs:
-            # 阶段 A: 积累期。尚未触达上限，全量加载。
-            # Cache 状态: Prefix Hit (Append 模式)
-            fetch_limit = total_count
-        else:
-            # 阶段 B: 循环截断期。
-            # 周期长度 = Max - Min
-            cycle_len = self.max_msgs - self.min_msgs
-            
-            # 计算当前溢出量
-            overflow = total_count - self.min_msgs
-            
-            # 计算当前周期内的偏移量
-            # remainder == 0 意味着刚触发截断的那一刻 (回退到 Min)
-            remainder = overflow % cycle_len
-            
-            # 目标窗口大小 = 基底 + 偏移量
-            fetch_limit = self.min_msgs + remainder
-            
-            # 防御性上限
-            fetch_limit = min(fetch_limit, self.max_msgs)
-
+        fetch_limit = self.compute_fetch_limit(
+            total_turns=total_turns,
+            max_turns=self.max_turns,
+            min_turns_ratio=self.min_turns_ratio,
+        )
         if fetch_limit <= 0:
             return
 
         # --- [数据加载] ---
-        # 务必保证 fetch_limit 是针对 "最近的消息"
-        recent_msgs = await self.session_manager.session_service.get_recent_messages(
-            session.id, 
-            limit=int(fetch_limit)
-        )
+        # 务必保证 fetch_limit 是针对 "最近的业务轮次"
+        recent_msgs = await self.session_manager.get_recent_messages(int(fetch_limit))
         
         # --- [构建上下文] ---
         llm_msgs = []
-        trace_ids = set()
+        turn_ids = set()
         
         for m in recent_msgs:
-            if m.trace_id:
-                trace_ids.add(m.trace_id)
+            if m.turn_id:
+                turn_ids.add(m.turn_id)
 
             if m.role == MessageRole.ACTIVITY:
                 # Activity is a frontend-only channel and must not pollute model context.
@@ -627,7 +639,7 @@ class ShortContextProcessor(BaseContextProcessor):
             ))
             
         ctx.history = llm_msgs
-        ctx.exclude_trace_ids.update(trace_ids)
+        ctx.exclude_turn_ids.update(turn_ids)
 
 class RAGContextProcessor(BaseContextProcessor):
     """
@@ -988,7 +1000,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
         session_uuid = self.session_manager.session.uuid
         runtime_ws = self.session_manager.runtime_workspace
         # 这是一个快照，绝对不能包含稍后 L1 召回的 IDs
-        stable_exclude_turn_ids = list(ctx.exclude_trace_ids) 
+        stable_exclude_turn_ids = list(ctx.exclude_turn_ids) 
         # --- Layer 1: Vector Recall (L1) ---
         if self.config.enable_vector_recall and query.strip():
             try:
@@ -999,7 +1011,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
                     query=safe_query,
                     agent_instance_id=agent_id,
                     session_uuid=session_uuid,
-                    exclude_trace_ids=stable_exclude_turn_ids,
+                    exclude_turn_ids=stable_exclude_turn_ids,
                     deep_memory_config=self.config,
                     runtime_workspace=runtime_ws
                 )
@@ -1008,11 +1020,11 @@ class DeepMemoryProcessor(BaseContextProcessor):
                     blocks = []
                     for turn in recalled_turns:
                         if not turn: continue
-                        trace_id = turn[0].trace_id
-                        if trace_id:
-                            # 注意：这里我们 NOT update ctx.exclude_trace_ids
+                        turn_id = turn[0].turn_id
+                        if turn_id:
+                            # 注意：这里我们 NOT update ctx.exclude_turn_ids
                             turn_content = "\n".join([f"{msg.role.value}: {chat_message_to_text(msg)}" for msg in turn])
-                            blocks.append(f"--- History (ID: {trace_id}) ---\n{turn_content}")
+                            blocks.append(f"--- History (ID: {turn_id}) ---\n{turn_content}")
                     if blocks:
                         full_recall_text = "\n### Recalled Conversation:\n" + "\n\n".join(blocks)
                         ctx.add_context_block(full_recall_text)
@@ -1027,7 +1039,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
                     agent_instance_id=agent_id,
                     user_id=self.context.actor.id,
                     session_uuid=session_uuid,
-                    exclude_trace_ids=stable_exclude_turn_ids,
+                    exclude_turn_ids=stable_exclude_turn_ids,
                     limit=self.config.max_summary_turns
                 )
                 
@@ -1045,5 +1057,5 @@ class DeepMemoryProcessor(BaseContextProcessor):
         lines = []
         for s in summaries:
             date_str = s.created_at.strftime('%Y-%m-%d') if s.created_at else "?"
-            lines.append(f"- [{date_str}] [ContextID:{s.trace_id}] {s.content}")
+            lines.append(f"- [{date_str}] [ContextID:{s.turn_id}] {s.content}")
         return "### Conversation Summaries:\n" + "\n".join(lines)

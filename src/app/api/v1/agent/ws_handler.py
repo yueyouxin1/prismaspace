@@ -99,7 +99,7 @@ class AgentSessionHandler:
             return
 
         await self._cancel_current_task()
-        self.current_run_id = run_input.run_id
+        self.current_run_id = None
         self.current_task = asyncio.create_task(self._run_chat_stream(agent_uuid, run_input))
         self.current_task.add_done_callback(self._cleanup_task)
 
@@ -126,6 +126,7 @@ class AgentSessionHandler:
         async with SessionLocal() as db:
             app_context = AppContext(
                 db=db,
+                db_session_factory=SessionLocal,
                 auth=self.auth_context,
                 redis_service=self.websocket.app.state.redis_service,
                 vector_manager=self.websocket.app.state.vector_manager,
@@ -135,6 +136,7 @@ class AgentSessionHandler:
             try:
                 run_result = await service.async_execute(agent_uuid, run_input, self.user)
                 cancel_fn = getattr(run_result, "cancel", None)
+                self.current_run_id = getattr(run_result, "run_id", None)
                 async for event in run_result.generator:
                     await self._send_event(event)
             except asyncio.CancelledError:
@@ -144,15 +146,18 @@ class AgentSessionHandler:
                     {
                         "type": "CUSTOM",
                         "name": "ps.control.cancelled",
-                        "value": {"runId": run_input.run_id, "threadId": run_input.thread_id},
+                        "value": {
+                            "runId": getattr(run_result, "run_id", run_input.run_id) if run_result else run_input.run_id,
+                            "threadId": getattr(run_result, "thread_id", run_input.thread_id) if run_result else run_input.thread_id,
+                        },
                     }
                 )
                 raise
             except Exception as exc:
                 logger.error("AG-UI websocket stream failed: %s", exc, exc_info=True)
                 await self._send_run_error(
-                    run_id=run_input.run_id,
-                    thread_id=run_input.thread_id,
+                    run_id=getattr(run_result, "run_id", run_input.run_id) if run_result else run_input.run_id,
+                    thread_id=getattr(run_result, "thread_id", run_input.thread_id) if run_result else run_input.thread_id,
                     code="AGENT_RUNTIME_ERROR",
                     message=str(exc),
                 )

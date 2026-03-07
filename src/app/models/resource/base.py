@@ -217,6 +217,7 @@ class ResourceInstance(Base):
     name = Column(String(255), nullable=False, comment="此版本的名称")
     # 增强/QoL
     description = Column(Text, nullable=True, comment="此版本的描述")
+    tool_schema = Column(JSON, nullable=True, comment="预构建的基础 LLM Tool Schema（不含引用边 overlay）")
     # 增强/QoL (从实现表移入)
     version_notes = Column(Text, comment="版本更新说明")
     

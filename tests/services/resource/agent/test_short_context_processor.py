@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.models.interaction.chat import MessageRole
+from app.services.resource.agent.agent_session_manager import AgentSessionManager
 from app.services.resource.agent.processors import (
     AgentPipelineContext,
     CustomHistoryMergeProcessor,
@@ -17,7 +18,7 @@ from app.engine.model.llm import LLMMessage
 async def test_short_context_processor_filters_activity_messages_from_llm_history():
     activity_message = SimpleNamespace(
         role=MessageRole.ACTIVITY,
-        trace_id="trace-1",
+        turn_id="turn-1",
         text_content="searching",
         content=None,
         content_parts=None,
@@ -26,7 +27,7 @@ async def test_short_context_processor_filters_activity_messages_from_llm_histor
     )
     assistant_message = SimpleNamespace(
         role=MessageRole.ASSISTANT,
-        trace_id="trace-1",
+        turn_id="turn-1",
         text_content="answer",
         content=None,
         content_parts=None,
@@ -34,12 +35,9 @@ async def test_short_context_processor_filters_activity_messages_from_llm_histor
         tool_call_id=None,
     )
 
-    session_service = SimpleNamespace(
-        get_recent_messages=AsyncMock(return_value=[activity_message, assistant_message])
-    )
     session_manager = SimpleNamespace(
-        session=SimpleNamespace(id=1, message_count=2),
-        session_service=session_service,
+        session=SimpleNamespace(id=1, turn_count=1, message_count=2),
+        get_recent_messages=AsyncMock(return_value=[activity_message, assistant_message]),
     )
 
     processor = ShortContextProcessor(
@@ -54,6 +52,72 @@ async def test_short_context_processor_filters_activity_messages_from_llm_histor
     assert len(ctx.history) == 1
     assert ctx.history[0].role == "assistant"
     assert ctx.history[0].content == "answer"
+
+
+@pytest.mark.asyncio
+async def test_short_context_processor_respects_single_turn_history_setting():
+    latest_turn_messages = [
+        SimpleNamespace(
+            role=MessageRole.USER,
+            turn_id="turn-3",
+            text_content="latest question",
+            content=None,
+            content_parts=None,
+            tool_calls=None,
+            tool_call_id=None,
+        ),
+        SimpleNamespace(
+            role=MessageRole.ASSISTANT,
+            turn_id="turn-3",
+            text_content="latest answer",
+            content=None,
+            content_parts=None,
+            tool_calls=None,
+            tool_call_id=None,
+        ),
+    ]
+    session_manager = SimpleNamespace(
+        session=SimpleNamespace(id=1, turn_count=3, message_count=12),
+        get_recent_messages=AsyncMock(return_value=latest_turn_messages),
+    )
+
+    processor = ShortContextProcessor(
+        context=SimpleNamespace(),
+        session_manager=session_manager,
+        max_turns=1,
+    )
+    ctx = AgentPipelineContext()
+
+    await processor.process(ctx)
+
+    session_manager.get_recent_messages.assert_awaited_once_with(1)
+    assert [message.turn_id for message in latest_turn_messages] == ["turn-3", "turn-3"]
+    assert [message.role for message in ctx.history] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_agent_session_manager_recent_turn_cache_reuses_prefetched_snapshot():
+    session_manager = object.__new__(AgentSessionManager)
+    session_manager.session = SimpleNamespace(id=1)
+    session_manager.session_service = SimpleNamespace(
+        get_recent_messages=AsyncMock(
+            return_value=[
+                SimpleNamespace(turn_id="turn-1"),
+                SimpleNamespace(turn_id="turn-1"),
+                SimpleNamespace(turn_id="turn-2"),
+                SimpleNamespace(turn_id="turn-3"),
+                SimpleNamespace(turn_id="turn-3"),
+            ]
+        )
+    )
+    session_manager._recent_turn_messages_cache = []
+    session_manager._recent_turn_messages_cache_turns = 0
+
+    await session_manager.preload_recent_messages(3)
+    recent_messages = await session_manager.get_recent_messages(2)
+
+    assert [message.turn_id for message in recent_messages] == ["turn-2", "turn-3", "turn-3"]
+    session_manager.session_service.get_recent_messages.assert_awaited_once_with(1, limit=3)
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import AppContext
 from app.services.base_service import BaseService
-from app.models import User, Team, Workspace, ChatMessage, MessageRole
+from app.models import User, Team, Workspace, ChatMessage, ChatSession, MessageRole
 from app.models.resource.agent import Agent
 from app.dao.workspace.workspace_dao import WorkspaceDao
 from app.dao.interaction.chat_dao import ChatMessageDao
@@ -79,14 +79,36 @@ class LongTermContextService(BaseService):
         
         return "\n\n".join(buffer)
 
+    @staticmethod
+    def _escape_filter_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    @classmethod
+    def _build_turn_filter_expr(
+        cls,
+        *,
+        agent_instance_id: int,
+        session_uuid: str,
+        turn_id: str,
+    ) -> str:
+        safe_session_uuid = cls._escape_filter_value(session_uuid)
+        safe_turn_id = cls._escape_filter_value(turn_id)
+        return (
+            f'payload["agent_instance_id"] == {agent_instance_id} '
+            f'&& payload["session_uuid"] == "{safe_session_uuid}" '
+            f'&& payload["turn_id"] == "{safe_turn_id}"'
+        )
+
     async def index_turn_background(
         self, 
         agent_instance_id: int,
         session_uuid: str,
-        trace_id: str, 
+        run_id: str,
+        turn_id: str,
         messages: List[ChatMessage],
         # 显式传入运行时工作空间ID，用于计费归属
-        runtime_workspace_id: int 
+        runtime_workspace_id: int,
+        trace_id: Optional[str] = None,
     ):
         """
         [Worker Task] 后台任务：索引一个对话轮次。
@@ -157,9 +179,7 @@ class LongTermContextService(BaseService):
                 if not res.vector:
                     continue
                 
-                # 为每个 Chunk 生成唯一 ID，但 Payload 里共享 trace_id
-                # 这样检索时可以通过 payload.trace_id 聚合
-                chunk_id = f"{trace_id}_chunk_{i}"
+                chunk_id = f"{turn_id}_chunk_{i}"
                 
                 vector_chunks_to_upsert.append(VectorChunk(
                     id=chunk_id,
@@ -167,6 +187,8 @@ class LongTermContextService(BaseService):
                     payload={
                         "agent_instance_id": agent_instance_id,
                         "session_uuid": session_uuid,
+                        "run_id": run_id,
+                        "turn_id": turn_id,
                         "trace_id": trace_id,
                         # 仅保留该 Chunk 的预览，而不是整轮文本
                         "content_preview": texts_to_embed[i][:100],
@@ -177,18 +199,36 @@ class LongTermContextService(BaseService):
             # 7. Upsert
             if vector_chunks_to_upsert:
                 engine = await self.vector_manager.get_engine("default")
+                filter_expr = self._build_turn_filter_expr(
+                    agent_instance_id=agent_instance_id,
+                    session_uuid=session_uuid,
+                    turn_id=turn_id,
+                )
+                existing_chunks = await engine.query(
+                    COLLECTION_NAME,
+                    filter_expr=filter_expr,
+                    output_fields=["pk"],
+                )
+                expected_chunk_ids = {chunk.id for chunk in vector_chunks_to_upsert}
+                stale_chunk_ids = [
+                    chunk.id
+                    for chunk in existing_chunks
+                    if isinstance(chunk.id, str) and chunk.id and chunk.id not in expected_chunk_ids
+                ]
+                if stale_chunk_ids:
+                    await engine.delete(COLLECTION_NAME, pks=stale_chunk_ids)
                 await engine.upsert(COLLECTION_NAME, vector_chunks_to_upsert)
-                logger.info(f"Indexed {len(vector_chunks_to_upsert)} chunks for trace {trace_id}")
+                logger.info("Indexed %s chunks for turn %s", len(vector_chunks_to_upsert), turn_id)
 
         except Exception as e:
-            logger.error(f"Failed to index long-term context for trace {trace_id}: {e}", exc_info=True)
+            logger.error("Failed to index long-term context for turn %s: %s", turn_id, e, exc_info=True)
 
     async def retrieve(
         self, 
         query: str, 
         agent_instance_id: int,
         session_uuid: str,
-        exclude_trace_ids: List[str], 
+        exclude_turn_ids: List[str], 
         deep_memory_config: DeepMemoryConfig,
         runtime_workspace: Workspace
     ) -> List[List[ChatMessage]]:
@@ -242,11 +282,11 @@ class LongTermContextService(BaseService):
             # Filter: 必须匹配 Agent, User 和 Session
             filter_expr = (
                 f'payload["agent_instance_id"] == {agent_instance_id} '
-                f'&& payload["session_uuid"] == "{session_uuid}"'
+                f'&& payload["session_uuid"] == "{self._escape_filter_value(session_uuid)}"'
             )
             
             # Oversampling Strategy
-            # 我们需要 N 个不同的 trace_id。假设平均每轮被切分为 5 个 chunk。
+            # 我们需要 N 个不同的 turn_id。假设平均每轮被切分为 5 个 chunk。
             # 设定 limit = target * 10 以确保足够召回
             target_count = deep_memory_config.max_recall_turns
             search_limit = target_count * 10
@@ -261,51 +301,54 @@ class LongTermContextService(BaseService):
                 filter_expr=filter_expr
             )
 
-            # 3. 聚合 Trace ID (去重与过滤)
-            valid_trace_ids = []
-            seen_traces = set(exclude_trace_ids) # 预先排除短期记忆中的 traces
+            # 3. 聚合 turn ID (去重与过滤)
+            valid_turn_ids = []
+            seen_turns = set(exclude_turn_ids)
             
             for res in search_results:
-                if len(valid_trace_ids) >= target_count:
+                if len(valid_turn_ids) >= target_count:
                     break
                 
                 # 相似度阈值过滤
                 if res.score < deep_memory_config.min_match_score:
                     continue
                 
-                tid = res.payload.get("trace_id")
-                if tid and tid not in seen_traces:
-                    valid_trace_ids.append(tid)
-                    seen_traces.add(tid)
+                tid = res.payload.get("turn_id")
+                if tid and tid not in seen_turns:
+                    valid_turn_ids.append(tid)
+                    seen_turns.add(tid)
 
-            if not valid_trace_ids:
+            if not valid_turn_ids:
                 return []
 
             # 4. 数据库反查 (Hydration)
-            # 我们需要按 Trace 分组返回，以便上层 Processor 可以按轮次组织 Prompt
-            
-            # 查出所有消息
             stmt = (
                 select(ChatMessage)
-                .where(ChatMessage.trace_id.in_(valid_trace_ids))
+                .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+                .where(
+                    ChatMessage.turn_id.in_(valid_turn_ids),
+                    ChatMessage.is_deleted == False,
+                    ChatSession.uuid == session_uuid,
+                    ChatSession.agent_instance_id == agent_instance_id,
+                )
                 .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
             )
             result = await self.db.execute(stmt)
             all_messages = result.scalars().all()
             
-            # 按 Trace ID 分组
-            messages_by_trace: Dict[str, List[ChatMessage]] = {tid: [] for tid in valid_trace_ids}
+            # 按 turn ID 分组
+            messages_by_turn: Dict[str, List[ChatMessage]] = {tid: [] for tid in valid_turn_ids}
             for msg in all_messages:
-                if msg.trace_id in messages_by_trace:
-                    messages_by_trace[msg.trace_id].append(msg)
+                if msg.turn_id in messages_by_turn:
+                    messages_by_turn[msg.turn_id].append(msg)
             
             # 按 valid_trace_ids 的顺序（即相关性顺序）返回
             # 或者按时间倒序？通常 RAG 倾向于相关性，但对话历史倾向于时间。
             # 考虑到这是“回忆”，我们保持相关性顺序，或者让上层决定。
             # 这里我们返回相关性顺序的轮次列表。
             ordered_turns = []
-            for tid in valid_trace_ids:
-                turn_msgs = messages_by_trace.get(tid)
+            for tid in valid_turn_ids:
+                turn_msgs = messages_by_turn.get(tid)
                 if turn_msgs:
                     ordered_turns.append(turn_msgs)
             
@@ -317,14 +360,26 @@ class LongTermContextService(BaseService):
             logger.error(f"LongTermContext retrieval failed: {e}", exc_info=True)
             return []
 
-    async def retrieve_by_trace_id_direct(self, trace_id: str) -> List[ChatMessage]:
+    async def retrieve_by_turn_id_direct(
+        self,
+        turn_id: str,
+        *,
+        session_uuid: str,
+        agent_instance_id: int,
+    ) -> List[ChatMessage]:
         """
-        [Tool Support] 根据 Trace ID 精确找回某一轮对话的完整内容。
+        [Tool Support] 根据 turn ID 精确找回某一轮对话的完整内容。
         用于 'expand_long_term_context' 工具。
         """
         stmt = (
             select(ChatMessage)
-            .where(ChatMessage.trace_id == trace_id)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatMessage.turn_id == turn_id,
+                ChatMessage.is_deleted == False,
+                ChatSession.uuid == session_uuid,
+                ChatSession.agent_instance_id == agent_instance_id,
+            )
             .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         )
         result = await self.db.execute(stmt)

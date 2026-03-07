@@ -68,6 +68,7 @@ TestSessionLocal = async_sessionmaker(
     autocommit=False, autoflush=False, expire_on_commit=False, bind=test_engine, class_=AsyncSession
 )
 
+
 # ==============================================================================
 # 1. 数据库和 Seeding Fixtures
 # ==============================================================================
@@ -124,17 +125,27 @@ async def setup_database():
 @pytest.fixture(scope="function")
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    [最终版 - E2E 模式] 使用 Commit-and-Cleanup 策略。
-    由于 TestSessionLocal 配置了 expire_on_commit=False，
-    测试代码可以在调用 commit() 后继续安全地使用 ORM 对象。
+    [最终版 - E2E 模式] 使用连接级外层事务 + savepoint。
+    这样测试代码和运行时派生会话都可以安全 commit，
+    同时在测试结束时通过回滚外层事务实现完整清理。
     """
-    async with TestSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            # 在测试结束后，事务将自动回滚，清理所有数据
-            await session.rollback()
-            await session.close()
+    async with test_engine.connect() as connection:
+        outer_transaction = await connection.begin()
+        RuntimeSessionLocal = async_sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            bind=connection,
+            class_=AsyncSession,
+            join_transaction_mode="create_savepoint",
+        )
+        async with RuntimeSessionLocal() as session:
+            try:
+                yield session
+            finally:
+                await session.close()
+                if outer_transaction.is_active:
+                    await outer_transaction.rollback()
 
 # ==============================================================================
 # 2. Mock 核心服务/引擎 Fixtures
@@ -316,6 +327,18 @@ async def client(
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
 
+    if not db_session.in_transaction():
+        await db_session.begin()
+    runtime_connection = await db_session.connection()
+    RuntimeSessionLocal = async_sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+        bind=runtime_connection,
+        class_=AsyncSession,
+        join_transaction_mode="create_savepoint",
+    )
+
     # 为当前测试的事件循环创建一个专用的 tenant data engine
     loop_local_tenant_engine = create_async_engine(settings.DATABASE_URL_TENANT_DATA, poolclass=NullPool)
     # 使用 monkeypatch 将全局引用的 engine 替换为我们新创建的这个
@@ -329,6 +352,7 @@ async def client(
     app.state.redis_service = real_redis_service
     app.state.vector_manager = vector_manager_mock
     app.state.arq_pool = arq_pool_mock
+    app.state.db_session_factory = RuntimeSessionLocal
 
     # --- 4. 运行测试 ---
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -350,6 +374,7 @@ async def client(
     if hasattr(app.state, 'redis_service'): del app.state.redis_service
     if hasattr(app.state, 'vector_manager'): del app.state.vector_manager
     if hasattr(app.state, 'arq_pool'): del app.state.arq_pool
+    if hasattr(app.state, 'db_session_factory'): del app.state.db_session_factory
 
 @pytest.fixture(scope="function")
 async def prod_like_client(
@@ -391,6 +416,7 @@ async def prod_like_client(
     app.state.redis_service = real_redis_service
     app.state.vector_manager = vector_manager_mock
     app.state.arq_pool = arq_pool_mock
+    app.state.db_session_factory = ProdLikeSessionLocal
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -407,6 +433,7 @@ async def prod_like_client(
     if hasattr(app.state, 'redis_service'): del app.state.redis_service
     if hasattr(app.state, 'vector_manager'): del app.state.vector_manager
     if hasattr(app.state, 'arq_pool'): del app.state.arq_pool
+    if hasattr(app.state, 'db_session_factory'): del app.state.db_session_factory
 
 # 提供一个通用的、可用于物理验证的 tenant data connection
 @pytest.fixture(scope="function")
@@ -754,6 +781,17 @@ def app_context_factory(
     """
     async def _factory(actor: Optional[User]=None) -> AppContext:
         auth_context = None
+        if not db_session.in_transaction():
+            await db_session.begin()
+        runtime_connection = await db_session.connection()
+        RuntimeSessionLocal = async_sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            bind=runtime_connection,
+            class_=AsyncSession,
+            join_transaction_mode="create_savepoint",
+        )
 
         if actor:
             permission_hierarchy = await preload_permission_hierarchy(db_session)
@@ -767,6 +805,7 @@ def app_context_factory(
 
         return AppContext(
             db=db_session,
+            db_session_factory=RuntimeSessionLocal,
             auth=auth_context,
             redis_service=real_redis_service,
             vector_manager=vector_manager_mock,

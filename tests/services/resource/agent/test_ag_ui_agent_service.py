@@ -43,7 +43,7 @@ async def test_build_ag_ui_inputs_maps_resume_multimodal_and_thread_session():
     processor = AgUiProcessor(normalizer)
     run_input = _build_run_input(
         resume={
-            "interruptId": "int-1",
+            "interruptId": "123e4567-e89b-12d3-a456-426614174000",
             "payload": {
                 "toolResults": [
                     {
@@ -60,11 +60,11 @@ async def test_build_ag_ui_inputs_maps_resume_multimodal_and_thread_session():
     assert isinstance(processed.input_content, list)
     assert processed.input_content[0]["type"] == "text"
     assert processed.input_content[0]["text"] == "hello"
-    assert processed.session_uuid == "thread-1"
+    assert processed.thread_id == "thread-1"
     assert len(processed.llm_tools) == 1
 
-    assert any(msg.role == "system" and "[CONTEXT]" in (msg.content or "") for msg in processed.history)
-    assert any(msg.role == "tool" and msg.tool_call_id == "call-1" for msg in processed.history)
+    assert any(msg.role == "system" and "[CONTEXT]" in (msg.content or "") for msg in processed.custom_history)
+    assert any(msg.role == "tool" and msg.tool_call_id == "call-1" for msg in processed.resume_messages)
 
 
 def test_protocol_adapter_registers_client_tools_during_adaptation():
@@ -81,7 +81,7 @@ def test_protocol_adapter_registers_client_tools_during_adaptation():
     registrar = _Registrar()
     adapted = adapter.adapt(run_input, tool_registrar=registrar)
 
-    assert adapted.session_uuid == "thread-1"
+    assert adapted.thread_id == "thread-1"
     assert len(adapted.client_tools) == 1
     assert registrar.names == ["ask_user_confirm"]
 
@@ -90,7 +90,7 @@ def test_protocol_adapter_extracts_resume_tool_call_ids():
     adapter = AgUiProtocolAdapter()
     run_input = _build_run_input(
         resume={
-            "interruptId": "int-1",
+            "interruptId": "123e4567-e89b-12d3-a456-426614174000",
             "payload": {
                 "toolResults": [
                     {"toolCallId": "call-1", "content": {"ok": True}},
@@ -103,7 +103,7 @@ def test_protocol_adapter_extracts_resume_tool_call_ids():
     adapted = adapter.adapt(run_input)
 
     assert adapted.resume_tool_call_ids == ["call-1", "call-2"]
-
+    assert adapted.resume_interrupt_id == "123e4567-e89b-12d3-a456-426614174000"
 
 def test_protocol_adapter_marks_custom_history_presence():
     adapter = AgUiProtocolAdapter()
@@ -232,7 +232,7 @@ def test_processor_allows_resume_only_without_new_user_message():
             "context": [],
             "forwardedProps": {},
             "resume": {
-                "interruptId": "int-1",
+                "interruptId": "123e4567-e89b-12d3-a456-426614174000",
                 "payload": {"toolResults": [{"toolCallId": "call-1", "content": {"ok": True}}]},
             },
         }
@@ -241,7 +241,7 @@ def test_processor_allows_resume_only_without_new_user_message():
     processed = processor.agui_to_agent_runtime(run_input)
 
     assert processed.input_content == ""
-    assert any(msg.role == "tool" and msg.tool_call_id == "call-1" for msg in processed.history)
+    assert any(msg.role == "tool" and msg.tool_call_id == "call-1" for msg in processed.resume_messages)
 
 
 def test_processor_accepts_long_thread_id():
@@ -251,7 +251,7 @@ def test_processor_accepts_long_thread_id():
 
     processed = processor.agui_to_agent_runtime(run_input)
 
-    assert processed.session_uuid == run_input.thread_id
+    assert processed.thread_id == run_input.thread_id
 
 
 def test_processor_rejects_resume_payload_without_tool_results_when_no_user_input():
@@ -292,7 +292,7 @@ def test_resume_payload_requires_tool_call_id():
                 "context": [],
                 "forwardedProps": {},
                 "resume": {
-                    "interruptId": "int-1",
+                    "interruptId": "123e4567-e89b-12d3-a456-426614174000",
                     "payload": {"toolResults": [{"content": {"ok": True}}]},
                 },
             }
@@ -305,11 +305,12 @@ def test_event_to_payload_unknown_value_maps_to_raw_event():
     assert payload["source"] == "prismaspace.agent"
 
 
-def test_is_valid_platform_session_uuid():
-    assert AgentService._is_valid_platform_session_uuid("123e4567-e89b-12d3-a456-426614174000")
-    assert not AgentService._is_valid_platform_session_uuid("")
-    assert not AgentService._is_valid_platform_session_uuid("thread-1")
-    assert not AgentService._is_valid_platform_session_uuid("123e4567e89b12d3a456426614174000")
+def test_is_valid_uuid():
+    assert AgentService._is_valid_uuid("123e4567-e89b-12d3-a456-426614174000")
+    assert AgentService._is_valid_uuid("123E4567-E89B-12D3-A456-426614174000")
+    assert not AgentService._is_valid_uuid("")
+    assert not AgentService._is_valid_uuid("thread-1")
+    assert not AgentService._is_valid_uuid("123e4567e89b12d3a456426614174000")
 
 
 def test_resolve_protocol_name_defaults_and_aliases():
@@ -320,6 +321,57 @@ def test_resolve_protocol_name_defaults_and_aliases():
     assert AgentService._resolve_protocol_name(run_default) == "ag-ui"
     assert AgentService._resolve_protocol_name(run_alias) == "ag-ui"
     assert AgentService._resolve_protocol_name(run_unknown) == "mcp"
+
+
+def test_interrupt_id_helpers_require_canonical_run_id():
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+
+    assert AgentService.build_interrupt_id(run_id) == run_id
+    assert AgentService._normalize_interrupt_id(run_id) == run_id
+    assert AgentService._normalize_interrupt_id("thread-1") is None
+    assert AgentService._normalize_interrupt_id("bad-value") is None
+
+
+def test_build_stream_message_ids_always_generates_platform_user_message_id():
+    ids = AgentService._build_stream_message_ids()
+
+    assert ids.user_message_id != "user-msg-1"
+    assert len(ids.user_message_id) == 36
+
+
+def test_build_stream_message_ids_generates_platform_ids():
+    ids = AgentService._build_stream_message_ids()
+
+    assert ids.user_message_id != ids.assistant_message_id
+    assert len(ids.user_message_id) == 36
+    assert len(ids.assistant_message_id) == 36
+
+
+def test_resolve_session_mode_defaults_and_aliases():
+    run_default = _build_run_input()
+    run_stateless = _build_run_input(forwardedProps={"sessionMode": "STATELESS"})
+    run_stateful = _build_run_input(forwardedProps={"sessionMode": "session"})
+
+    assert AgentService._resolve_session_mode(run_default) == "auto"
+    assert AgentService._resolve_session_mode(run_stateless) == "stateless"
+    assert AgentService._resolve_session_mode(run_stateful) == "stateful"
+
+
+def test_requires_persistent_session_binding_only_for_session_intent():
+    run_auto = _build_run_input()
+    run_with_uuid_thread = _build_run_input(threadId="123e4567-e89b-12d3-a456-426614174000")
+    run_with_legacy_session_prop = _build_run_input(
+        forwardedProps={"sessionUuid": "123e4567-e89b-12d3-a456-426614174000"}
+    )
+    run_stateless = _build_run_input(
+        threadId="123e4567-e89b-12d3-a456-426614174000",
+        forwardedProps={"sessionMode": "stateless"},
+    )
+
+    assert AgentService._requires_persistent_session_binding(run_auto) is False
+    assert AgentService._requires_persistent_session_binding(run_with_uuid_thread) is True
+    assert AgentService._requires_persistent_session_binding(run_with_legacy_session_prop) is False
+    assert AgentService._requires_persistent_session_binding(run_stateless) is False
 
 
 def test_resolve_model_context_window_with_fallback_keys():
@@ -353,7 +405,7 @@ def test_extract_pending_tool_call_ids():
     assert pending == {"call-2", "call-3"}
 
 
-def test_buffer_custom_history_messages_persists_reasoning_and_tool_result():
+def test_buffer_protocol_history_messages_persists_reasoning_and_tool_result():
     service = object.__new__(AgentService)
     calls = []
     session_manager = SimpleNamespace(
@@ -365,7 +417,7 @@ def test_buffer_custom_history_messages_persists_reasoning_and_tool_result():
         LLMMessage(role="tool", content='{"ok":true}', tool_call_id="call-1"),
     ]
 
-    service._buffer_custom_history_messages(session_manager, history)
+    service._buffer_protocol_history_messages(session_manager, history)
 
     assert len(calls) == 2
     assert calls[0]["role"] == MessageRole.REASONING
@@ -384,9 +436,7 @@ async def test_enforce_pending_tool_results_requires_resume_matches():
     )
     session_manager = SimpleNamespace(
         session=SimpleNamespace(id=1),
-        session_service=SimpleNamespace(
-            get_recent_messages=AsyncMock(return_value=[assistant_with_tool])
-        ),
+        get_recent_messages=AsyncMock(return_value=[assistant_with_tool]),
     )
 
     with pytest.raises(ServiceException, match="Pending client tool results are required"):
@@ -394,6 +444,7 @@ async def test_enforce_pending_tool_results_requires_resume_matches():
             session_manager=session_manager,
             resume_tool_call_ids=[],
         )
+    session_manager.get_recent_messages.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio

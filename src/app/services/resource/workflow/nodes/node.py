@@ -547,8 +547,6 @@ class AppAgentNode(BaseNode, BaseLLMNodeProcessor):
         )
 
         forwarded_props: Dict[str, Any] = {}
-        if session_uuid:
-            forwarded_props["sessionUuid"] = session_uuid
         if enable_session is False or (enable_session is not True and not session_uuid):
             forwarded_props["sessionMode"] = "stateless"
 

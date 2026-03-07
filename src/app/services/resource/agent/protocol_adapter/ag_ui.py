@@ -26,15 +26,15 @@ class AgUiProtocolAdapter(ProtocolAdapter):
         *,
         tool_registrar: Optional[ClientToolRegistrar] = None,
     ) -> ProtocolAdaptedRun:
-        session_uuid = run_input.thread_id.strip() if isinstance(run_input.thread_id, str) else ""
+        thread_id = run_input.thread_id.strip() if isinstance(run_input.thread_id, str) else ""
 
         context_messages = self.normalizer.agui_context_to_llm_messages(run_input.context or [])
-        input_query, input_content_parts, history = self.normalizer.agui_messages_to_query_and_history(
+        input_query, input_content_parts, custom_history = self.normalizer.agui_messages_to_query_and_history(
             run_input.messages or []
         )
-        has_custom_history = bool(history)
+        has_custom_history = bool(custom_history)
         if context_messages:
-            history = [*context_messages, *history]
+            custom_history = [*context_messages, *custom_history]
 
         resume_tool_messages = self.normalizer.agui_to_resume_tool_messages(run_input)
         resume_tool_call_ids: List[str] = []
@@ -42,7 +42,6 @@ class AgUiProtocolAdapter(ProtocolAdapter):
             for tool_message in resume_tool_messages:
                 if tool_message.tool_call_id:
                     resume_tool_call_ids.append(tool_message.tool_call_id)
-            history.extend(resume_tool_messages)
 
         if (
             not input_query
@@ -65,11 +64,13 @@ class AgUiProtocolAdapter(ProtocolAdapter):
 
         return ProtocolAdaptedRun(
             input_content=input_content,
-            history=history,
-            session_uuid=session_uuid,
+            thread_id=thread_id,
             client_tools=client_tools,
+            custom_history=custom_history,
+            resume_messages=resume_tool_messages,
             has_custom_history=has_custom_history,
             resume_tool_call_ids=resume_tool_call_ids,
+            resume_interrupt_id=run_input.resume.interrupt_id if run_input.resume else None,
         )
 
     @staticmethod

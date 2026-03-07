@@ -37,7 +37,9 @@ class AgentContextSummaryRead(BaseModel):
     uuid: str
     content: str
     scope: str
-    trace_id: str
+    run_id: str
+    turn_id: str
+    trace_id: Optional[str] = None
     session_uuid: Optional[str]
     created_at: datetime
     # 可以在这里扩展 module_name 等信息

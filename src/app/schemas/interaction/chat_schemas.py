@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.models.interaction.chat import MessageRole
-from app.models.interaction.chat import ChatSession
+from app.models.interaction.chat import ChatMessage, ChatSession
 
 # --- Session Schemas ---
 
@@ -57,10 +57,36 @@ class ChatMessageRead(BaseModel):
     meta: Optional[Dict[str, Any]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    run_id: Optional[str] = None
+    turn_id: Optional[str] = None
     trace_id: Optional[str] = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='before')
+    @classmethod
+    def pre_process_message(cls, data: Any) -> Any:
+        if not isinstance(data, ChatMessage):
+            return data
+
+        return {
+            "uuid": data.uuid,
+            "role": data.role,
+            "content": data.content,
+            "text_content": data.text_content,
+            "content_parts": data.content_parts,
+            "reasoning_content": data.reasoning_content,
+            "activity_type": data.activity_type,
+            "encrypted_value": data.encrypted_value,
+            "meta": data.meta,
+            "tool_calls": data.tool_calls,
+            "tool_call_id": data.tool_call_id,
+            "run_id": data.run_id,
+            "turn_id": data.turn_id,
+            "trace_id": data.trace_id,
+            "created_at": data.created_at,
+        }
 
 class ContextClearRequest(BaseModel):
     """清空上下文的请求参数"""

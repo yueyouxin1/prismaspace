@@ -2,8 +2,17 @@
 
 from dataclasses import dataclass
 from typing import Callable, Optional
-from app.utils.async_generator import AsyncGeneratorManager 
+
 from app.schemas.resource.agent.agent_schemas import AgentConfig
+from app.utils.async_generator import AsyncGeneratorManager
+
+
+@dataclass(frozen=True)
+class AgentStreamMessageIds:
+    user_message_id: str
+    assistant_message_id: str
+    reasoning_message_id: str
+    activity_message_id: str
 
 @dataclass
 class AgentRunResult:
@@ -15,5 +24,8 @@ class AgentRunResult:
     """
     generator: AsyncGeneratorManager 
     config: AgentConfig
-    trace_id: str
+    run_id: str
+    turn_id: str
+    trace_id: Optional[str]
+    thread_id: str
     cancel: Optional[Callable[[], None]] = None

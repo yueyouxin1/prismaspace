@@ -13,6 +13,7 @@ from .base import (
     AuthType,
     ALL_INSTANCE_TYPES
 )
+from .execution import ResourceExecution, ResourceExecutionStatus
 
 # 2. 依次加载所有子域包，这将触发它们的自注册
 from .uiapp import *

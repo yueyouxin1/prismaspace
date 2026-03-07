@@ -4,7 +4,7 @@ from fastapi import Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from app.core.context import AppContext
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.api.dependencies.authentication import get_auth, AuthContext
 
 # --- 步骤1: 定义一个纯粹的基础上下文构建器 ---
@@ -19,6 +19,7 @@ async def get_base_context(
     """
     return AppContext(
         db=db,
+        db_session_factory=getattr(request.app.state, "db_session_factory", SessionLocal),
         auth=None, # 初始时 auth 为 None
         redis_service=getattr(request.app.state, "redis_service", None),
         vector_manager=getattr(request.app.state, "vector_manager", None),

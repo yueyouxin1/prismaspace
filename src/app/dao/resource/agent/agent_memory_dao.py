@@ -1,9 +1,11 @@
 from typing import List, Optional
+
+from sqlalchemy import and_, delete, desc, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, delete, desc
+
 from app.dao.base_dao import BaseDao
-from app.models.resource.agent.agent_memory import AgentMemoryVar, AgentMemoryVarValue
 from app.models.resource.agent.agent_memory import AgentContextSummary, SummaryScope
+from app.models.resource.agent.agent_memory import AgentMemoryVar, AgentMemoryVarValue
 
 class AgentMemoryVarDao(BaseDao[AgentMemoryVar]):
     def __init__(self, db_session: AsyncSession):
@@ -34,12 +36,15 @@ class AgentContextSummaryDao(BaseDao[AgentContextSummary]):
     def __init__(self, db_session: AsyncSession):
         super().__init__(AgentContextSummary, db_session)
 
+    async def get_by_uuid(self, uuid: str) -> AgentContextSummary | None:
+        return await self.get_one(where={"uuid": uuid})
+
     async def get_active_summaries(
         self, 
         agent_instance_id: int, 
         user_id: int, 
         session_uuid: Optional[str] = None,
-        exclude_trace_ids: Optional[List[str]] = None,
+        exclude_turn_ids: Optional[List[str]] = None,
         page: int = 0,
         limit: int = 0
     ):
@@ -56,8 +61,8 @@ class AgentContextSummaryDao(BaseDao[AgentContextSummary]):
             AgentContextSummary.is_archived == False
         ]
 
-        if exclude_trace_ids:
-            filters.append(AgentContextSummary.trace_id.not_in(exclude_trace_ids))
+        if exclude_turn_ids:
+            filters.append(AgentContextSummary.turn_id.not_in(exclude_turn_ids))
         
         # 构建 OR 条件：Scope=USER OR (Scope=SESSION AND session_uuid=...)
         scope_condition = (AgentContextSummary.scope == SummaryScope.USER)
@@ -83,18 +88,46 @@ class AgentContextSummaryDao(BaseDao[AgentContextSummary]):
         result = await self.db_session.execute(stmt)
         return list(result.scalars().all())
 
-    async def soft_delete_by_trace_id(self, trace_id: str):
-        """[软删除] 归档特定 Trace 的摘要"""
+    async def soft_delete_by_turn_id(
+        self,
+        turn_id: str,
+        *,
+        session_uuid: Optional[str] = None,
+        agent_instance_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ):
+        """[软删除] 归档特定业务轮次的摘要"""
+        filters = [AgentContextSummary.turn_id == turn_id]
+        if session_uuid:
+            filters.append(AgentContextSummary.session_uuid == session_uuid)
+        if agent_instance_id is not None:
+            filters.append(AgentContextSummary.agent_instance_id == agent_instance_id)
+        if user_id is not None:
+            filters.append(AgentContextSummary.user_id == user_id)
         stmt = (
             update(AgentContextSummary)
-            .where(AgentContextSummary.trace_id == trace_id)
+            .where(*filters)
             .values(is_archived=True)
         )
         await self.db_session.execute(stmt)
 
-    async def physical_delete_by_trace_id(self, trace_id: str):
-        """[硬删除] 物理清除特定 Trace 的摘要"""
-        stmt = delete(AgentContextSummary).where(AgentContextSummary.trace_id == trace_id)
+    async def physical_delete_by_turn_id(
+        self,
+        turn_id: str,
+        *,
+        session_uuid: Optional[str] = None,
+        agent_instance_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ):
+        """[硬删除] 物理清除特定业务轮次的摘要"""
+        filters = [AgentContextSummary.turn_id == turn_id]
+        if session_uuid:
+            filters.append(AgentContextSummary.session_uuid == session_uuid)
+        if agent_instance_id is not None:
+            filters.append(AgentContextSummary.agent_instance_id == agent_instance_id)
+        if user_id is not None:
+            filters.append(AgentContextSummary.user_id == user_id)
+        stmt = delete(AgentContextSummary).where(*filters)
         await self.db_session.execute(stmt)
     
     async def soft_delete_by_session_uuid(self, session_uuid: str):
@@ -106,5 +139,12 @@ class AgentContextSummaryDao(BaseDao[AgentContextSummary]):
                 AgentContextSummary.scope == SummaryScope.SESSION
             )
             .values(is_archived=True)
+        )
+        await self.db_session.execute(stmt)
+
+    async def physical_delete_by_session_uuid(self, session_uuid: str):
+        stmt = delete(AgentContextSummary).where(
+            AgentContextSummary.session_uuid == session_uuid,
+            AgentContextSummary.scope == SummaryScope.SESSION
         )
         await self.db_session.execute(stmt)

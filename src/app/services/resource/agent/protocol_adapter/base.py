@@ -17,11 +17,13 @@ class ClientToolRegistrar(Protocol):
 @dataclass(frozen=True)
 class ProtocolAdaptedRun:
     input_content: str | List[Dict[str, JsonValue]]
-    history: List[LLMMessage]
-    session_uuid: str
+    thread_id: str
     client_tools: List[LLMTool]
+    custom_history: List[LLMMessage] = field(default_factory=list)
+    resume_messages: List[LLMMessage] = field(default_factory=list)
     has_custom_history: bool = False
     resume_tool_call_ids: List[str] = field(default_factory=list)
+    resume_interrupt_id: Optional[str] = None
 
 
 class ProtocolAdapter(ABC):

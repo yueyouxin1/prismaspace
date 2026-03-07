@@ -3,6 +3,8 @@
 import logging
 from typing import List, Optional
 
+from sqlalchemy import func
+
 from app.core.context import AppContext
 from app.services.base_service import BaseService
 from app.services.common.llm_capability_provider import AICapabilityProvider, UsageAccumulator, LLMBillingCallbacks
@@ -18,11 +20,9 @@ from app.services.resource.agent.message_content import chat_message_to_text
 from app.engine.model.llm import (
     LLMRunConfig, 
     LLMMessage, 
-    LLMEngineCallbacks, 
-    LLMUsage,
     LLMResult
 )
-from app.services.exceptions import ConfigurationError
+from app.services.exceptions import ConfigurationError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ class ContextSummaryService(BaseService):
     负责摘要的存储、检索、归档和删除。
     """
     def __init__(self, context: AppContext):
+        self.context = context
         self.dao = AgentContextSummaryDao(context.db)
         self.workspace_dao = WorkspaceDao(context.db)
         self.instance_dao = ResourceInstanceDao(context.db)
@@ -42,11 +43,14 @@ class ContextSummaryService(BaseService):
         self, 
         agent_instance_id: int,
         user_id: int,
-        trace_id: str,
+        run_id: str,
+        turn_id: str,
         content: str,
         module_version_id: int,
         scope: SummaryScope = SummaryScope.SESSION,
-        session_uuid: Optional[str] = None
+        session_uuid: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        ref_created_at=None,
     ) -> AgentContextSummary:
         """
         [Internal] 供后台 Worker 调用，用于保存生成的摘要。
@@ -54,11 +58,14 @@ class ContextSummaryService(BaseService):
         summary = AgentContextSummary(
             agent_instance_id=agent_instance_id,
             user_id=user_id,
+            run_id=run_id,
+            turn_id=turn_id,
             trace_id=trace_id,
             content=content,
             module_version_id=module_version_id,
             scope=scope,
-            session_uuid=session_uuid
+            session_uuid=session_uuid,
+            ref_created_at=ref_created_at,
         )
         await self.dao.add(summary)
         return summary
@@ -68,14 +75,14 @@ class ContextSummaryService(BaseService):
         agent_instance_id: int, 
         user_id: int, 
         session_uuid: Optional[str] = None,
-        exclude_trace_ids: Optional[List[str]] = None,
+        exclude_turn_ids: Optional[List[str]] = None,
         page: int = 1,
         limit: int = 10
     ) -> List[AgentContextSummaryRead]:
         """
         [UI/Debug] 获取摘要列表，用于可视化面板展示。
         """
-        summaries = await self.dao.get_active_summaries(agent_instance_id, user_id, session_uuid, exclude_trace_ids, page, limit)
+        summaries = await self.dao.get_active_summaries(agent_instance_id, user_id, session_uuid, exclude_turn_ids, page, limit)
         return [AgentContextSummaryRead.model_validate(s) for s in summaries]
 
     async def get_summary(self, summary_uuid: str) -> AgentContextSummaryRead:
@@ -84,20 +91,39 @@ class ContextSummaryService(BaseService):
             raise NotFoundError("Context summary not found.")
         return AgentContextSummaryRead.model_validate(summary)
 
-    async def invalid_summary_for_trace(self, trace_id: str, mode: str = "production"):
+    async def invalid_summary_for_turn(
+        self,
+        turn_id: str,
+        *,
+        session_uuid: Optional[str] = None,
+        agent_instance_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        mode: str = "production",
+    ):
         """
         [联动接口] 当 SessionService 删除消息时调用。
-        作废该 trace_id 对应的所有摘要。
+        作废该业务轮次对应的所有摘要。
         """
-        if not trace_id: return
+        if not turn_id:
+            return
         
         if mode == "debug":
-            await self.dao.physical_delete_by_trace_id(trace_id)
+            await self.dao.physical_delete_by_turn_id(
+                turn_id,
+                session_uuid=session_uuid,
+                agent_instance_id=agent_instance_id,
+                user_id=user_id,
+            )
         else:
-            await self.dao.soft_delete_by_trace_id(trace_id)
+            await self.dao.soft_delete_by_turn_id(
+                turn_id,
+                session_uuid=session_uuid,
+                agent_instance_id=agent_instance_id,
+                user_id=user_id,
+            )
 
     async def delete_session_summaries_physical(self, session_uuid: str):
-        await self.dao.physical_delete_by_session(session_uuid)
+        await self.dao.physical_delete_by_session_uuid(session_uuid)
         
     async def archive_session_summaries(self, session_uuid: str):
         """[联动接口] 当会话被删除/归档时调用"""
@@ -140,11 +166,13 @@ class ContextSummaryService(BaseService):
         self,
         agent_instance_id: int,
         session_uuid: str,
-        trace_id: str,
+        run_id: str,
+        turn_id: str,
         messages: List[ChatMessage],
         deep_memory_config: DeepMemoryConfig,
         # 显式传入运行时工作空间ID，用于计费归属
-        runtime_workspace_id: int 
+        runtime_workspace_id: int,
+        trace_id: Optional[str] = None,
     ):
         """
         [Worker Task] 后台任务：生成摘要并入库。
@@ -219,25 +247,35 @@ class ContextSummaryService(BaseService):
             # 7. 处理结果 & 入库
             summary_content = final_result.message.content.strip()
             if not summary_content:
-                logger.warning(f"Empty summary generated for trace {trace_id}")
+                logger.warning("Empty summary generated for turn %s", turn_id)
                 return
 
             scope_enum = SummaryScope(deep_memory_config.summary_scope)
             
             turn_start_time = messages[0].created_at if messages else func.now()
+
+            await self.invalid_summary_for_turn(
+                turn_id=turn_id,
+                session_uuid=session_uuid,
+                agent_instance_id=agent_instance.id,
+                user_id=self.context.actor.id,
+                mode="production",
+            )
             
             await self.create_summary_internal(
                 agent_instance_id=agent_instance.id,
                 user_id=self.context.actor.id,
-                trace_id=trace_id,
+                run_id=run_id,
+                turn_id=turn_id,
                 content=summary_content,
                 module_version_id=target_version.id,
                 scope=scope_enum,
                 session_uuid=session_uuid,
+                trace_id=trace_id,
                 ref_created_at=turn_start_time
             )
             
-            logger.info(f"Generated summary for trace {trace_id}. Scope: {scope_enum.value}. Tokens: {usage_accumulator.total_tokens}")
+            logger.info("Generated summary for turn %s. Scope: %s. Tokens: %s", turn_id, scope_enum.value, usage_accumulator.total_tokens)
 
         except Exception as e:
-            logger.error(f"Context summary task failed for trace {trace_id}: {e}", exc_info=True)
+            logger.error("Context summary task failed for turn %s: %s", turn_id, e, exc_info=True)

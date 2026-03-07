@@ -1,12 +1,11 @@
 # src/app/services/resource/agent/agent_session_manager.py
 
-import uuid
 import logging
 from typing import List, Dict, Any, Optional
 from app.core.context import AppContext
 from app.models import User, Workspace
 from app.models.resource.agent import Agent
-from app.models.interaction.chat import ChatSession, MessageRole
+from app.models.interaction.chat import ChatMessage, ChatSession, MessageRole
 from app.services.resource.agent.session_service import SessionService
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 from app.services.exceptions import ServiceException, NotFoundError
@@ -28,6 +27,8 @@ class AgentSessionManager:
         self, 
         context: AppContext, 
         session_uuid: Optional[str], 
+        run_id: str,
+        turn_id: str,
         trace_id: Optional[str],
         agent_instance: Agent,
         # 显式传入运行时工作空间ID，用于计费归属
@@ -47,8 +48,14 @@ class AgentSessionManager:
         
         # 内部状态
         self.session: Optional[ChatSession] = None
+        self.run_id: str = run_id
+        self.turn_id: str = turn_id
         self.trace_id: str = trace_id
         self.message_buffer: List[Dict[str, Any]] = [] # 待提交的消息缓冲区
+        # 单次请求内的最近 turn 快照缓存，避免首 token 前重复查库。
+        self._recent_turn_messages_cache: List[ChatMessage] = []
+        self._recent_turn_messages_cache_turns: int = 0
+        self._post_commit_jobs: List[Dict[str, Any]] = []
 
     async def initialize(self):
         """加载或创建会话"""
@@ -67,9 +74,51 @@ class AgentSessionManager:
                 self.session = None
                 raise ServiceException("Agent Session Initialize Error.")
 
+    @staticmethod
+    def _slice_recent_turn_messages(messages: List[ChatMessage], turns: int) -> List[ChatMessage]:
+        if turns <= 0 or not messages:
+            return []
+
+        selected_turn_ids: List[str] = []
+        seen_turn_ids = set()
+        for message in reversed(messages):
+            turn_id = getattr(message, "turn_id", None)
+            if not isinstance(turn_id, str) or not turn_id or turn_id in seen_turn_ids:
+                continue
+            seen_turn_ids.add(turn_id)
+            selected_turn_ids.append(turn_id)
+            if len(selected_turn_ids) >= turns:
+                break
+
+        if not selected_turn_ids:
+            return []
+
+        selected_turn_id_set = set(selected_turn_ids)
+        return [
+            message
+            for message in messages
+            if getattr(message, "turn_id", None) in selected_turn_id_set
+        ]
+
+    async def get_recent_messages(self, turns: int) -> List[ChatMessage]:
+        if not self.session or turns <= 0:
+            return []
+
+        if self._recent_turn_messages_cache_turns >= turns and self._recent_turn_messages_cache:
+            return self._slice_recent_turn_messages(self._recent_turn_messages_cache, turns)
+
+        recent_messages = await self.session_service.get_recent_messages(self.session.id, limit=turns)
+        self._recent_turn_messages_cache = recent_messages
+        self._recent_turn_messages_cache_turns = turns
+        return recent_messages
+
+    async def preload_recent_messages(self, turns: int) -> None:
+        await self.get_recent_messages(turns)
+
     def buffer_message(
         self, 
         role: MessageRole, 
+        message_uuid: Optional[str] = None,
         text_content: Optional[str] = None,
         content_parts: Optional[List[Dict[str, Any]]] = None,
         reasoning_content: Optional[str] = None,
@@ -87,7 +136,10 @@ class AgentSessionManager:
         """
         [Buffer] 将消息暂存到内存缓冲区，等待本轮 Trace 结束统一提交。
         """
+        normalized_meta = dict(meta or {})
+
         self.message_buffer.append({
+            "message_uuid": message_uuid,
             "role": role,
             "text_content": text_content if text_content is not None else content,
             "content_parts": content_parts,
@@ -98,9 +150,40 @@ class AgentSessionManager:
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
             "token_count": token_count,
+            "run_id": self.run_id,
+            "turn_id": self.turn_id,
             "trace_id": self.trace_id,
-            "meta": meta,
+            "meta": normalized_meta or None,
         })
+
+    def clear_post_commit_jobs(self) -> None:
+        self._post_commit_jobs.clear()
+
+    async def dispatch_post_commit_jobs(self) -> None:
+        if not self._post_commit_jobs:
+            return
+
+        pending_jobs = list(self._post_commit_jobs)
+        self._post_commit_jobs.clear()
+        for job in pending_jobs:
+            job_name = job["name"]
+            payload = dict(job["payload"])
+            try:
+                await self.context.arq_pool.enqueue_job(job_name, **payload)
+                logger.info(
+                    "Dispatched deferred job %s for turn %s (run %s)",
+                    job_name,
+                    payload.get("turn_id"),
+                    payload.get("run_id"),
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to dispatch deferred job %s for turn %s: %s",
+                    job_name,
+                    payload.get("turn_id"),
+                    exc,
+                    exc_info=True,
+                )
 
     async def commit(self, deep_memory_config: DeepMemoryConfig):
         """
@@ -125,6 +208,8 @@ class AgentSessionManager:
             # 只有在 DB 写入成功后，才清空 buffer
             messages_committed = list(self.message_buffer) # 浅拷贝用于后续任务
             self.message_buffer.clear() 
+            self._recent_turn_messages_cache = []
+            self._recent_turn_messages_cache_turns = 0
             # 2. 检查是否有价值内容 (User/Assistant)
             has_valuable_content = any(
                 m['role'] in [MessageRole.USER, MessageRole.ASSISTANT] 
@@ -137,30 +222,44 @@ class AgentSessionManager:
                 # Layer 1: Long Term Context (Vector Indexing)
                 # 即使 deep_memory 总开关关闭，如果未来打算开启，现在索引也是有益的？
                 # 策略：严格遵循配置。如果 enabled=False，不消耗资源进行索引。
+                job_payload = {
+                    "agent_instance_id": self.session.agent_instance_id,
+                    "session_uuid": self.session.uuid,
+                    "run_id": self.run_id,
+                    "turn_id": self.turn_id,
+                    "trace_id": self.trace_id,
+                    "runtime_workspace_id": self.runtime_workspace.id,
+                    "user_uuid": self.actor.uuid,
+                }
+
                 if deep_memory_config.enable_vector_recall:
-                    await self.context.arq_pool.enqueue_job(
-                        'index_long_term_context_task',
-                        agent_instance_id=self.session.agent_instance_id,
-                        session_uuid=self.session.uuid,
-                        trace_id=self.trace_id,
-                        runtime_workspace_id=self.runtime_workspace.id,
-                        user_uuid=self.actor.uuid
+                    self._post_commit_jobs.append(
+                        {
+                            "name": "index_turn_task",
+                            "payload": dict(job_payload),
+                        }
                     )
-                    logger.info(f"Triggered long-term context indexing for trace {self.trace_id}")
+                    logger.info(
+                        "Queued deferred long-term context indexing for turn %s (run %s)",
+                        self.turn_id,
+                        self.run_id,
+                    )
 
                 # Layer 2: Context Summarization
                 if deep_memory_config.enable_summarization:
-                    await self.context.arq_pool.enqueue_job(
-                        'summarize_trace_task',
-                        agent_instance_id=self.session.agent_instance_id,
-                        session_uuid=self.session.uuid,
-                        trace_id=self.trace_id,
-                        runtime_workspace_id=self.runtime_workspace.id,
-                        user_uuid=self.actor.uuid
+                    self._post_commit_jobs.append(
+                        {
+                            "name": "summarize_turn_task",
+                            "payload": dict(job_payload),
+                        }
                     )
-                    logger.info(f"Triggered context summarization for trace {self.trace_id}")
+                    logger.info(
+                        "Queued deferred context summarization for turn %s (run %s)",
+                        self.turn_id,
+                        self.run_id,
+                    )
             
-            logger.info(f"Committed {len(messages_committed)} messages for trace {self.trace_id}")
+            logger.info("Committed %s messages for turn %s (run %s)", len(messages_committed), self.turn_id, self.run_id)
             
         except Exception as e:
             logger.error(f"Failed to commit agent session buffer: {e}", exc_info=True)

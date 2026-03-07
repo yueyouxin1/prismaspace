@@ -45,9 +45,13 @@ async def stream_agent(
     async def sse_generator():
         run_result = None
         cancel_fn = None
+        thread_id = request.thread_id
+        run_id = request.run_id
         try:
             run_result = await service.async_execute(uuid, request, context.actor)
             cancel_fn = getattr(run_result, "cancel", None)
+            thread_id = getattr(run_result, "thread_id", None) or thread_id
+            run_id = getattr(run_result, "run_id", run_id)
             async for event in run_result.generator:
                 yield _encode(event)
         except GeneratorExit:
@@ -58,8 +62,8 @@ async def stream_agent(
             yield _encode(
                 RunErrorEvent(
                     type=EventType.RUN_ERROR,
-                    threadId=request.thread_id,
-                    runId=request.run_id,
+                    threadId=thread_id,
+                    runId=run_id,
                     code="AGENT_SERVICE_ERROR",
                     message=str(exc),
                     retriable=False,
@@ -69,8 +73,8 @@ async def stream_agent(
             yield _encode(
                 RunErrorEvent(
                     type=EventType.RUN_ERROR,
-                    threadId=request.thread_id,
-                    runId=request.run_id,
+                    threadId=thread_id,
+                    runId=run_id,
                     code="AGENT_RUNTIME_ERROR",
                     message=str(exc),
                     retriable=False,

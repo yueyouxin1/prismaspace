@@ -31,6 +31,7 @@ class ResourceRefDao(BaseDao[ResourceRef]):
                     ResourceInstance.resource_type,
                     ResourceInstance.name,
                     ResourceInstance.description,
+                    ResourceInstance.tool_schema,
                 )
             ),
             joinedload(ResourceRef.target_resource).options(
