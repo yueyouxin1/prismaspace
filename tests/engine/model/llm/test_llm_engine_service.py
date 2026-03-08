@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 from app.engine.model.llm import LLMEngineService, LLMProviderConfig
 from app.engine.model.llm.base import BaseLLMClient, LLMEngineError, LLMProviderNotFoundError 
+from app.engine.model.llm.main import _llm_clients_registry
 
 # 标记所有测试为异步
 pytestmark = pytest.mark.asyncio
@@ -12,10 +13,22 @@ pytestmark = pytest.mark.asyncio
 class MockLLMClient(BaseLLMClient):
     """一个用于测试的、可控制行为的模拟客户端。"""
     def __init__(self, config):
+        self.config = config
         self.generate_mock = AsyncMock()
+        self.close_mock = AsyncMock()
 
     async def generate(self, run_config, messages, callbacks):
         await self.generate_mock(run_config, messages, callbacks)
+
+    async def aclose(self):
+        await self.close_mock()
+
+
+@pytest.fixture(autouse=True)
+async def clear_cached_clients():
+    await LLMEngineService.close_cached_clients()
+    yield
+    await LLMEngineService.close_cached_clients()
 
 
 async def test_engine_selects_correct_client(monkeypatch, mock_openai_provider_config, mock_stream_run_config, mock_messages):
@@ -122,3 +135,65 @@ async def test_engine_uses_context_manager_with_reserved_budget(
         max_context_tokens=4096,
         reserve_tokens=1500,
     )
+
+
+async def test_engine_reuses_client_for_same_provider_config(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    client1 = engine._get_client(mock_openai_provider_config)
+    client2 = engine._get_client(mock_openai_provider_config.model_copy())
+
+    assert client1 is client2
+    assert len(CachedClient.instances) == 1
+
+
+async def test_engine_keeps_clients_isolated_for_different_provider_configs(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    other_config = mock_openai_provider_config.model_copy(update={"api_key": "another-key"})
+
+    client1 = engine._get_client(mock_openai_provider_config)
+    client2 = engine._get_client(other_config)
+
+    assert client1 is not client2
+    assert len(CachedClient.instances) == 2
+
+
+async def test_engine_close_cached_clients_closes_all_reused_clients(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    engine._get_client(mock_openai_provider_config)
+    engine._get_client(mock_openai_provider_config.model_copy())
+
+    assert len(CachedClient.instances) == 1
+
+    await LLMEngineService.close_cached_clients()
+
+    CachedClient.instances[0].close_mock.assert_awaited_once()

@@ -27,6 +27,9 @@ class OpenAIClient(LLMClientBase):
             max_retries=config.max_retries,
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     async def _handle_streamed_response(
         self, 
         stream: AsyncGenerator, 

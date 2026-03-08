@@ -180,3 +180,11 @@ class BaseLLMClient(ABC):
         注意：此方法不直接返回结果，而是通过回调函数向外通知状态。
         """
         ...
+
+    async def aclose(self) -> None:
+        """Optional cleanup hook for reusable clients."""
+        return None
+
+    async def aclose(self) -> None:
+        """Optional cleanup hook for reusable clients."""
+        return None

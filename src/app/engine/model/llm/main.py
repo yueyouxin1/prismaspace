@@ -1,8 +1,10 @@
 # src/app/engine/model/llm/main.py
 
 import asyncio
+import hashlib
 import logging
-from typing import Dict, Type, List, Optional
+import threading
+from typing import Dict, Type, List, Optional, Tuple
 from .base import (
     BaseLLMClient, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMResult, 
     LLMEngineCallbacks, LLMEngineError, LLMProviderNotFoundError 
@@ -25,9 +27,24 @@ class LLMEngineService:
     纯粹的、无状态的LLM执行引擎。
     它现在集成了上下文管理器，以确保请求在发送前是合规的。
     """
+    _client_cache: Dict[Tuple[str, str, str, int, int], BaseLLMClient] = {}
+    _client_cache_lock = threading.Lock()
+
     def __init__(self):
         self.context_manager = LLMContextManager() # 实例化上下文管理器
-    
+
+    @staticmethod
+    def _build_client_cache_key(config: LLMProviderConfig) -> Tuple[str, str, str, int, int]:
+        api_key_hash = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
+        base_url = str(config.base_url) if config.base_url else ""
+        return (
+            config.client_name,
+            api_key_hash,
+            base_url,
+            config.timeout,
+            config.max_retries,
+        )
+
     def _get_client(self, config: LLMProviderConfig) -> BaseLLMClient:
         """
         工厂方法：根据提供商名称查找并实例化客户端。
@@ -40,9 +57,28 @@ class LLMEngineService:
                 f"No LLM client registered for provider '{client_name}'. "
                 f"Available providers: {list(_llm_clients_registry.keys())}"
             )
-        
-        # 每次调用都创建一个新的客户端实例，以确保配置隔离
-        return client_class(config)
+
+        cache_key = self._build_client_cache_key(config)
+        with self._client_cache_lock:
+            client = self._client_cache.get(cache_key)
+            if client is not None:
+                return client
+
+            client = client_class(config)
+            self._client_cache[cache_key] = client
+            return client
+
+    @classmethod
+    async def close_cached_clients(cls) -> None:
+        with cls._client_cache_lock:
+            clients = list(cls._client_cache.values())
+            cls._client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.aclose()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to close cached LLM client: %s", exc)
 
     async def run(
         self,

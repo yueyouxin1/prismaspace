@@ -28,6 +28,7 @@ from app.services.billing.interceptor import InsufficientFundsError
 from app.services.exceptions import ServiceException, PermissionDeniedError
 from app.system.vectordb.manager import SystemVectorManager
 from app.system.resource.workflow.node_def_manager import NodeDefManager
+from app.engine.model.llm import LLMEngineService
 from app.engine.vector.main import VectorEngineManager, VectorEngineConfig
 from app.middleware import AuthenticationMiddleware
 from app.observability import PerformanceObservabilityMiddleware, PyInstrumentProfilingMiddleware
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
     
     # --- 清理 ---
     print("Closing Redis connections...")
+    await LLMEngineService.close_cached_clients()
     await app.state.redis_service.close()
     await app.state.arq_pool.aclose()
     await app.state.vector_manager.shutdown()

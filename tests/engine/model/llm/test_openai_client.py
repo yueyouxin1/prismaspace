@@ -74,11 +74,14 @@ async def mock_async_iterator(items):
 
 # --- Fixture for mocked client ---
 @pytest.fixture
-def mock_openai_sdk_client(mocker):
+def mock_openai_sdk_client(monkeypatch):
     """一个模拟的 openai.AsyncOpenAI 实例的 fixture。"""
     mock_client = AsyncMock()
     mock_client.chat.completions.create = AsyncMock()
-    mocker.patch("app.engine.model.llm.clients.openai_client.openai.AsyncOpenAI", return_value=mock_client)
+    monkeypatch.setattr(
+        "app.engine.model.llm.clients.openai_client.openai.AsyncOpenAI",
+        lambda *args, **kwargs: mock_client,
+    )
     return mock_client
 
 # --- 测试用例 (保持不变) ---
@@ -93,16 +96,14 @@ async def test_generate_stream_text(mock_openai_sdk_client, mock_openai_provider
 
     client = OpenAIClient(mock_openai_provider_config)
     callbacks = AsyncMock()
-    await client.generate(mock_stream_run_config, mock_messages, callbacks)
+    result = await client.generate(mock_stream_run_config, mock_messages, callbacks)
 
     mock_openai_sdk_client.chat.completions.create.assert_called_once()
     assert callbacks.on_chunk_generated.call_count == 2
     callbacks.on_chunk_generated.assert_any_call("Hello")
     callbacks.on_chunk_generated.assert_any_call(" world")
-    callbacks.on_success.assert_called_once()
-    final_message = callbacks.on_success.call_args[0][0]
-    assert final_message.role == "assistant"
-    assert final_message.content == "Hello world"
+    assert result.message.role == "assistant"
+    assert result.message.content == "Hello world"
 
 
 async def test_generate_non_stream_tool_call(mock_openai_sdk_client, mock_openai_provider_config, mock_tool_run_config, mock_messages):

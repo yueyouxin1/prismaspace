@@ -3,6 +3,7 @@
 from arq import create_pool
 from arq.connections import RedisSettings
 from app.db.session import SessionLocal, engine
+from app.engine.model.llm import LLMEngineService
 from app.services.redis_service import RedisService
 from app.engine.vector.main import VectorEngineManager, VectorEngineConfig
 from app.core.config import settings
@@ -39,6 +40,7 @@ async def shutdown(ctx):
     """Worker 进程关闭时，清理资源。"""
     redis_service = ctx['redis_service']
     vector_manager = ctx['vector_manager']
+    await LLMEngineService.close_cached_clients()
     await redis_service.close()
     await vector_manager.shutdown()
     await ctx['arq_pool'].aclose()
