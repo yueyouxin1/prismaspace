@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
     
     # --- 清理 ---
     print("Closing Redis connections...")
-    await LLMEngineService.close_cached_clients()
+    await LLMEngineService.close_shared_clients()
     await app.state.redis_service.close()
     await app.state.arq_pool.aclose()
     await app.state.vector_manager.shutdown()

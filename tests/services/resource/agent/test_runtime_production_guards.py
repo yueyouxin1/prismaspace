@@ -139,16 +139,24 @@ async def test_background_task_locks_preflight_and_commits_before_terminal_event
             )
         )
     )
-    service.ai_provider = SimpleNamespace(
-        execute_agent_with_billing=AsyncMock(
-            return_value=AgentResult(
-                message=LLMMessage(role="assistant", content="done"),
-                steps=[],
-                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-                outcome="completed",
+    class FakeAIProvider:
+        def __init__(self):
+            self.execute_agent_with_billing = AsyncMock(
+                return_value=AgentResult(
+                    message=LLMMessage(role="assistant", content="done"),
+                    steps=[],
+                    usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                    outcome="completed",
+                )
             )
-        )
-    )
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    service.ai_provider = FakeAIProvider()
     service.execution_ledger_service = SimpleNamespace(
         mark_running=AsyncMock(side_effect=fake_mark_running),
         mark_finished=AsyncMock(side_effect=fake_mark_finished),

@@ -32,10 +32,11 @@ class LLMEngineService:
 
     def __init__(self):
         self.context_manager = LLMContextManager() # 实例化上下文管理器
+        self._request_client_cache: Dict[Tuple[str, str, str, int, int], BaseLLMClient] = {}
 
     @staticmethod
     def _build_client_cache_key(config: LLMProviderConfig) -> Tuple[str, str, str, int, int]:
-        api_key_hash = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
+        api_key_hash = config.cache_key or hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
         base_url = str(config.base_url) if config.base_url else ""
         return (
             config.client_name,
@@ -59,6 +60,15 @@ class LLMEngineService:
             )
 
         cache_key = self._build_client_cache_key(config)
+        if config.cache_scope == "request":
+            client = self._request_client_cache.get(cache_key)
+            if client is not None:
+                return client
+
+            client = client_class(config)
+            self._request_client_cache[cache_key] = client
+            return client
+
         with self._client_cache_lock:
             client = self._client_cache.get(cache_key)
             if client is not None:
@@ -68,8 +78,18 @@ class LLMEngineService:
             self._client_cache[cache_key] = client
             return client
 
+    async def clear_request_scoped_clients(self) -> None:
+        clients = list(self._request_client_cache.values())
+        self._request_client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.aclose()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to close request-scoped LLM client: %s", exc)
+
     @classmethod
-    async def close_cached_clients(cls) -> None:
+    async def close_shared_clients(cls) -> None:
         with cls._client_cache_lock:
             clients = list(cls._client_cache.values())
             cls._client_cache.clear()

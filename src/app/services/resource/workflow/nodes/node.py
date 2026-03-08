@@ -430,25 +430,26 @@ class AppLLMNode(BaseNode, BaseLLMNodeProcessor):
 
         async def run_llm_task() -> None:
             try:
-                estimated_input = len(str(messages)) // 3
-                estimated_output = run_config.max_tokens
+                async with agent_service.ai_provider:
+                    estimated_input = len(str(messages)) // 3
+                    estimated_output = run_config.max_tokens
 
-                async def _execute_llm():
-                    return await agent_service.ai_provider.execute_llm(
+                    async def _execute_llm():
+                        return await agent_service.ai_provider.execute_llm(
+                            module_context=module_context,
+                            run_config=run_config,
+                            messages=messages,
+                            callbacks=callbacks
+                        )
+
+                    await agent_service.ai_provider.with_billing(
+                        runtime_workspace=runtime_workspace,
                         module_context=module_context,
-                        run_config=run_config,
-                        messages=messages,
-                        callbacks=callbacks
+                        estimated_input_tokens=estimated_input,
+                        estimated_output_tokens=estimated_output,
+                        usage_accumulator=usage_accumulator,
+                        execution_func=_execute_llm
                     )
-
-                await agent_service.ai_provider.with_billing(
-                    runtime_workspace=runtime_workspace,
-                    module_context=module_context,
-                    estimated_input_tokens=estimated_input,
-                    estimated_output_tokens=estimated_output,
-                    usage_accumulator=usage_accumulator,
-                    execution_func=_execute_llm
-                )
             except Exception as exc:
                 logger.error("Workflow LLM node failed: %s", exc, exc_info=True)
                 if not callbacks.error_emitted:

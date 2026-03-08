@@ -182,101 +182,102 @@ class ContextSummaryService(BaseService):
             return
 
         try:
-            # 1. 准备上下文 (Agent, Workspace)
-            agent_instance = await self.instance_dao.get_by_pk(agent_instance_id)
-            if not agent_instance: return
+            async with self.ai_provider:
+                # 1. 准备上下文 (Agent, Workspace)
+                agent_instance = await self.instance_dao.get_by_pk(agent_instance_id)
+                if not agent_instance: return
 
-            runtime_workspace = await self.workspace_dao.get_by_pk(runtime_workspace_id)
-            if not runtime_workspace:
-                logger.error(f"Runtime workspace {runtime_workspace_id} not found. Aborting summary task.")
-                return
+                runtime_workspace = await self.workspace_dao.get_by_pk(runtime_workspace_id)
+                if not runtime_workspace:
+                    logger.error(f"Runtime workspace {runtime_workspace_id} not found. Aborting summary task.")
+                    return
 
-            # 2. 解析模型版本 (使用 Provider 的标准解析逻辑)
-            # 自动处理：指定ID -> 校验 -> 回退默认 -> 报错
-            target_version = await self.ai_provider.resolve_model_version(
-                deep_memory_config.summary_model_uuid
-            )
-            
-            # 获取执行所需的凭证上下文
-            module_context = await self.module_service.get_runtime_context(
-                version_id=target_version.id,
-                actor=self.context.actor,
-                workspace=runtime_workspace
-            )
-
-            # 3. 准备 Prompt & Messages
-            transcript = self._build_turn_transcript(messages)
-            system_prompt = (
-                "You are an expert conversation summarizer. "
-                "Your goal is to create a concise, objective summary of the user's intent and the assistant's key actions or answers. "
-                "Ignore specific tool output details unless they are crucial to the final answer. "
-                "The summary should be 1-2 sentences long."
-            )
-            llm_messages = [
-                LLMMessage(role="system", content=system_prompt),
-                LLMMessage(role="user", content=f"Conversation Transcript:\n{transcript}\n\nSummary:")
-            ]
-
-            # 4. 准备执行配置
-            run_config = LLMRunConfig(
-                model=module_context.version.name,
-                temperature=0.3, 
-                max_tokens=200,
-                stream=False
-            )
-            
-            # 5. 初始化用量累加器和回调
-            usage_accumulator = UsageAccumulator()
-            # [Fix] 将 accumulator 注入回调，确保 Engine 产生的数据能被捕获
-            callbacks = LLMBillingCallbacks(usage_accumulator)
-
-            # 6. [核心] 执行并计费
-            final_result: Optional[LLMResult] = None
-            try:
-                final_result = await self.ai_provider.execute_llm_with_billing(
-                    runtime_workspace=runtime_workspace,
-                    module_context=module_context,
-                    run_config=run_config,
-                    messages=llm_messages,
-                    callbacks=callbacks,
-                    usage_accumulator=usage_accumulator
+                # 2. 解析模型版本 (使用 Provider 的标准解析逻辑)
+                # 自动处理：指定ID -> 校验 -> 回退默认 -> 报错
+                target_version = await self.ai_provider.resolve_model_version(
+                    deep_memory_config.summary_model_uuid
                 )
-            except Exception as e:
-                final_result = callbacks.final_result
-                if not final_result: raise
-            
-            # 7. 处理结果 & 入库
-            summary_content = final_result.message.content.strip()
-            if not summary_content:
-                logger.warning("Empty summary generated for turn %s", turn_id)
-                return
+                
+                # 获取执行所需的凭证上下文
+                module_context = await self.module_service.get_runtime_context(
+                    version_id=target_version.id,
+                    actor=self.context.actor,
+                    workspace=runtime_workspace
+                )
 
-            scope_enum = SummaryScope(deep_memory_config.summary_scope)
-            
-            turn_start_time = messages[0].created_at if messages else func.now()
+                # 3. 准备 Prompt & Messages
+                transcript = self._build_turn_transcript(messages)
+                system_prompt = (
+                    "You are an expert conversation summarizer. "
+                    "Your goal is to create a concise, objective summary of the user's intent and the assistant's key actions or answers. "
+                    "Ignore specific tool output details unless they are crucial to the final answer. "
+                    "The summary should be 1-2 sentences long."
+                )
+                llm_messages = [
+                    LLMMessage(role="system", content=system_prompt),
+                    LLMMessage(role="user", content=f"Conversation Transcript:\n{transcript}\n\nSummary:")
+                ]
 
-            await self.invalid_summary_for_turn(
-                turn_id=turn_id,
-                session_uuid=session_uuid,
-                agent_instance_id=agent_instance.id,
-                user_id=self.context.actor.id,
-                mode="production",
-            )
-            
-            await self.create_summary_internal(
-                agent_instance_id=agent_instance.id,
-                user_id=self.context.actor.id,
-                run_id=run_id,
-                turn_id=turn_id,
-                content=summary_content,
-                module_version_id=target_version.id,
-                scope=scope_enum,
-                session_uuid=session_uuid,
-                trace_id=trace_id,
-                ref_created_at=turn_start_time
-            )
-            
-            logger.info("Generated summary for turn %s. Scope: %s. Tokens: %s", turn_id, scope_enum.value, usage_accumulator.total_tokens)
+                # 4. 准备执行配置
+                run_config = LLMRunConfig(
+                    model=module_context.version.name,
+                    temperature=0.3, 
+                    max_tokens=200,
+                    stream=False
+                )
+                
+                # 5. 初始化用量累加器和回调
+                usage_accumulator = UsageAccumulator()
+                # [Fix] 将 accumulator 注入回调，确保 Engine 产生的数据能被捕获
+                callbacks = LLMBillingCallbacks(usage_accumulator)
+
+                # 6. [核心] 执行并计费
+                final_result: Optional[LLMResult] = None
+                try:
+                    final_result = await self.ai_provider.execute_llm_with_billing(
+                        runtime_workspace=runtime_workspace,
+                        module_context=module_context,
+                        run_config=run_config,
+                        messages=llm_messages,
+                        callbacks=callbacks,
+                        usage_accumulator=usage_accumulator
+                    )
+                except Exception as e:
+                    final_result = callbacks.final_result
+                    if not final_result: raise
+                
+                # 7. 处理结果 & 入库
+                summary_content = final_result.message.content.strip()
+                if not summary_content:
+                    logger.warning("Empty summary generated for turn %s", turn_id)
+                    return
+
+                scope_enum = SummaryScope(deep_memory_config.summary_scope)
+                
+                turn_start_time = messages[0].created_at if messages else func.now()
+
+                await self.invalid_summary_for_turn(
+                    turn_id=turn_id,
+                    session_uuid=session_uuid,
+                    agent_instance_id=agent_instance.id,
+                    user_id=self.context.actor.id,
+                    mode="production",
+                )
+                
+                await self.create_summary_internal(
+                    agent_instance_id=agent_instance.id,
+                    user_id=self.context.actor.id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    content=summary_content,
+                    module_version_id=target_version.id,
+                    scope=scope_enum,
+                    session_uuid=session_uuid,
+                    trace_id=trace_id,
+                    ref_created_at=turn_start_time
+                )
+                
+                logger.info("Generated summary for turn %s. Scope: %s. Tokens: %s", turn_id, scope_enum.value, usage_accumulator.total_tokens)
 
         except Exception as e:
             logger.error("Context summary task failed for turn %s: %s", turn_id, e, exc_info=True)

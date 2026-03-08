@@ -40,7 +40,7 @@ async def shutdown(ctx):
     """Worker 进程关闭时，清理资源。"""
     redis_service = ctx['redis_service']
     vector_manager = ctx['vector_manager']
-    await LLMEngineService.close_cached_clients()
+    await LLMEngineService.close_shared_clients()
     await redis_service.close()
     await vector_manager.shutdown()
     await ctx['arq_pool'].aclose()

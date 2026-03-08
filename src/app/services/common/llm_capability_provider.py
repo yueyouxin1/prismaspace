@@ -94,6 +94,25 @@ class AICapabilityProvider:
         self.smv_dao = ServiceModuleVersionDao(context.db)
         # 引擎层是无状态的，可以复用
         self._llm_engine = LLMEngineService()
+
+    async def __aenter__(self) -> "AICapabilityProvider":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.clear_request_scoped_clients()
+
+    @staticmethod
+    def _build_llm_provider_config(module_context: ModuleRuntimeContext) -> LLMProviderConfig:
+        credential = module_context.credential
+        return LLMProviderConfig(
+            client_name=AICapabilityProvider._resolve_llm_client_name(module_context),
+            api_key=credential.api_key,
+            base_url=credential.endpoint,
+            cache_scope="request" if credential.is_custom else "shared",
+        )
+
+    async def clear_request_scoped_clients(self) -> None:
+        await self._llm_engine.clear_request_scoped_clients()
         
     @staticmethod
     def _resolve_llm_client_name(module_context: ModuleRuntimeContext) -> str:
@@ -200,12 +219,7 @@ class AICapabilityProvider:
         # 内部使用，用于连接 Billing Wrapper
         _usage_accumulator: Optional[UsageAccumulator] = None
     ) -> LLMResult:
-        client_name = self._resolve_llm_client_name(module_context)
-        provider_config = LLMProviderConfig(
-            client_name=client_name,
-            api_key=module_context.credential.api_key,
-            base_url=module_context.credential.endpoint
-        )
+        provider_config = self._build_llm_provider_config(module_context)
 
         return await self._llm_engine.run(
             provider_config=provider_config,
@@ -257,12 +271,7 @@ class AICapabilityProvider:
         callbacks: Optional[AgentEngineCallbacks] = None,
         max_iterations: int = 10
     ) -> AgentResult:
-        client_name = self._resolve_llm_client_name(module_context)
-        provider_config = LLMProviderConfig(
-            client_name=client_name,
-            api_key=module_context.credential.api_key,
-            base_url=module_context.credential.endpoint
-        )
+        provider_config = self._build_llm_provider_config(module_context)
 
         agent_engine = AgentEngineService(
             llm_engine=self._llm_engine,

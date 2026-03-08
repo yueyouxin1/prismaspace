@@ -26,9 +26,9 @@ class MockLLMClient(BaseLLMClient):
 
 @pytest.fixture(autouse=True)
 async def clear_cached_clients():
-    await LLMEngineService.close_cached_clients()
+    await LLMEngineService.close_shared_clients()
     yield
-    await LLMEngineService.close_cached_clients()
+    await LLMEngineService.close_shared_clients()
 
 
 async def test_engine_selects_correct_client(monkeypatch, mock_openai_provider_config, mock_stream_run_config, mock_messages):
@@ -137,7 +137,7 @@ async def test_engine_uses_context_manager_with_reserved_budget(
     )
 
 
-async def test_engine_reuses_client_for_same_provider_config(monkeypatch, mock_openai_provider_config):
+async def test_engine_reuses_request_scoped_client_within_same_engine(monkeypatch, mock_openai_provider_config):
     engine = LLMEngineService()
 
     class CachedClient(MockLLMClient):
@@ -149,15 +149,18 @@ async def test_engine_reuses_client_for_same_provider_config(monkeypatch, mock_o
 
     monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
 
-    client1 = engine._get_client(mock_openai_provider_config)
-    client2 = engine._get_client(mock_openai_provider_config.model_copy())
+    request_config = mock_openai_provider_config.model_copy(update={"cache_scope": "request"})
+    client1 = engine._get_client(request_config)
+    client2 = engine._get_client(request_config.model_copy())
 
     assert client1 is client2
     assert len(CachedClient.instances) == 1
+    await engine.clear_request_scoped_clients()
 
 
-async def test_engine_keeps_clients_isolated_for_different_provider_configs(monkeypatch, mock_openai_provider_config):
+async def test_engine_keeps_request_scoped_clients_isolated_across_engines(monkeypatch, mock_openai_provider_config):
     engine = LLMEngineService()
+    other_engine = LLMEngineService()
 
     class CachedClient(MockLLMClient):
         instances = []
@@ -168,16 +171,40 @@ async def test_engine_keeps_clients_isolated_for_different_provider_configs(monk
 
     monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
 
-    other_config = mock_openai_provider_config.model_copy(update={"api_key": "another-key"})
-
-    client1 = engine._get_client(mock_openai_provider_config)
-    client2 = engine._get_client(other_config)
+    request_config = mock_openai_provider_config.model_copy(update={"cache_scope": "request"})
+    client1 = engine._get_client(request_config)
+    client2 = other_engine._get_client(request_config.model_copy())
 
     assert client1 is not client2
     assert len(CachedClient.instances) == 2
+    await engine.clear_request_scoped_clients()
+    await other_engine.clear_request_scoped_clients()
 
 
-async def test_engine_close_cached_clients_closes_all_reused_clients(monkeypatch, mock_openai_provider_config):
+async def test_engine_reuses_shared_client_across_engines(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+    other_engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    shared_config = mock_openai_provider_config.model_copy(update={"cache_scope": "shared"})
+    client1 = engine._get_client(shared_config)
+    client2 = other_engine._get_client(shared_config.model_copy())
+
+    assert client1 is client2
+    assert len(CachedClient.instances) == 1
+    await engine.clear_request_scoped_clients()
+    await other_engine.clear_request_scoped_clients()
+
+
+async def test_engine_keeps_shared_clients_isolated_for_different_provider_configs(monkeypatch, mock_openai_provider_config):
     engine = LLMEngineService()
 
     class CachedClient(MockLLMClient):
@@ -189,11 +216,59 @@ async def test_engine_close_cached_clients_closes_all_reused_clients(monkeypatch
 
     monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
 
-    engine._get_client(mock_openai_provider_config)
-    engine._get_client(mock_openai_provider_config.model_copy())
+    shared_config = mock_openai_provider_config.model_copy(update={"cache_scope": "shared"})
+    other_shared_config = shared_config.model_copy(update={"api_key": "another-key"})
+
+    client1 = engine._get_client(shared_config)
+    client2 = engine._get_client(other_shared_config)
+
+    assert client1 is not client2
+    assert len(CachedClient.instances) == 2
+    await engine.clear_request_scoped_clients()
+
+
+async def test_engine_close_cached_clients_closes_all_shared_clients(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    shared_config = mock_openai_provider_config.model_copy(update={"cache_scope": "shared"})
+    engine._get_client(shared_config)
+    engine._get_client(shared_config.model_copy())
 
     assert len(CachedClient.instances) == 1
 
-    await LLMEngineService.close_cached_clients()
+    await LLMEngineService.close_shared_clients()
 
     CachedClient.instances[0].close_mock.assert_awaited_once()
+
+
+async def test_engine_clear_request_scoped_clients_closes_request_scoped_clients_only(monkeypatch, mock_openai_provider_config):
+    engine = LLMEngineService()
+
+    class CachedClient(MockLLMClient):
+        instances = []
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.__class__.instances.append(self)
+
+    monkeypatch.setitem(_llm_clients_registry, "openai", CachedClient)
+
+    request_config = mock_openai_provider_config.model_copy(update={"cache_scope": "request"})
+    shared_config = mock_openai_provider_config.model_copy(update={"cache_scope": "shared", "api_key": "platform-key"})
+
+    request_client = engine._get_client(request_config)
+    shared_client = engine._get_client(shared_config)
+
+    await engine.clear_request_scoped_clients()
+
+    request_client.close_mock.assert_awaited_once()
+    shared_client.close_mock.assert_not_awaited()

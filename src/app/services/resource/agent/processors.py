@@ -701,24 +701,25 @@ class RAGContextProcessor(BaseContextProcessor):
             return
 
         try:
-            rag_context_blocks = []
-            
-            # 2. 策略分发
-            if self.config.call_method == "always":
-                # [Always Mode] 强制使用全局配置，作为一个大批次处理，忽略个别差异以追求速度和统一性
-                block = await self._execute_search_batch_global(query_text, [ref.target_instance.uuid for ref in kb_refs], self.config)
-                if block: rag_context_blocks.append(block)
-            else:
-                # [Auto Mode] 智能路由 -> 参数分组 -> 批量执行 -> 行为重映射
-                block = await self.as_need_search(query_text, kb_refs)
-                if block: rag_context_blocks.append(block)
-            
-            # 3. 注入上下文
-            if rag_context_blocks:
-                # 使用分割线明确区分 RAG 内容
-                full_rag_text = "\n".join(rag_context_blocks)
-                ctx.add_context_block(full_rag_text)
+            async with self.ai_provider:
+                rag_context_blocks = []
                 
+                # 2. 策略分发
+                if self.config.call_method == "always":
+                    # [Always Mode] 强制使用全局配置，作为一个大批次处理，忽略个别差异以追求速度和统一性
+                    block = await self._execute_search_batch_global(query_text, [ref.target_instance.uuid for ref in kb_refs], self.config)
+                    if block: rag_context_blocks.append(block)
+                else:
+                    # [Auto Mode] 智能路由 -> 参数分组 -> 批量执行 -> 行为重映射
+                    block = await self.as_need_search(query_text, kb_refs)
+                    if block: rag_context_blocks.append(block)
+                
+                # 3. 注入上下文
+                if rag_context_blocks:
+                    # 使用分割线明确区分 RAG 内容
+                    full_rag_text = "\n".join(rag_context_blocks)
+                    ctx.add_context_block(full_rag_text)
+                    
         except Exception as e:
             logger.error(f"[RAGProcessor] Search process failed: {e}", exc_info=True)
 

@@ -15,6 +15,14 @@ class LLMProviderConfig(BaseModel):
     base_url: Optional[HttpUrl] = Field(None, description="API的基础URL，用于代理或私有部署")
     timeout: int = Field(60, description="API请求的超时时间（秒）")
     max_retries: int = Field(2, description="API请求的最大重试次数")
+    cache_scope: Literal["shared", "request"] = Field(
+        default="request",
+        description="Client cache scope: shared for process-wide reuse, request for single runtime reuse.",
+    )
+    cache_key: Optional[str] = Field(
+        default=None,
+        description="Optional application-provided cache key for shared client reuse.",
+    )
 
 class LLMToolFunction(BaseModel):
     name: str

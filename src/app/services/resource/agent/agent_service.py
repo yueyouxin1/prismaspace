@@ -700,129 +700,130 @@ class AgentService(ResourceImplementationService):
         final_result: Optional[AgentResult] = None
         pending_post_commit_dispatch = False
         try:
-            callbacks = PersistingAgentCallbacks(
-                generator_manager=generator_manager,
-                session_manager=session_manager,
-                trace_id=trace_manager.force_trace_id,
-                run_id=execution.run_id,
-                turn_id=turn_id,
-                usage_accumulator=usage_accumulator,
-                run_input=run_input,
-                message_ids=message_ids,
-                interrupt_id_builder=self.build_interrupt_id,
-            )
-
-            if adapted is None or tool_executor is None or agent_instance is None:
-                raise ServiceException("Agent background task missing runtime prerequisites.")
-
-            session = session_manager.session if session_manager and session_manager.session else None
-            lock_ctx = self._session_lock(session.uuid) if session else nullcontext()
-
-            async with lock_ctx:
-                if session:
-                    await self.db.refresh(session)
-                    preload_turns = ShortContextProcessor.compute_fetch_limit(
-                        total_turns=session.turn_count,
-                        max_turns=agent_config.io_config.history_turns,
-                    )
-                    if session.turn_count > 0:
-                        await session_manager.preload_recent_messages(max(1, preload_turns))
-                    await self._enforce_pending_tool_results(
-                        session_manager=session_manager,
-                        resume_tool_call_ids=adapted.resume_tool_call_ids,
-                    )
-                    if adapted.resume_messages:
-                        self._buffer_protocol_history_messages(
-                            session_manager=session_manager,
-                            history=adapted.resume_messages,
-                        )
-
-                prompt_variables = await self.agent_memory_var_service.get_runtime_object(
-                    agent_instance.version_id,
-                    self.context.actor.id,
-                    session.uuid if session else None,
-                )
-                rendered_system_prompt = self.prompt_template.render(
-                    agent_instance.system_prompt,
-                    prompt_variables,
-                )
-                history_messages = [*adapted.custom_history, *adapted.resume_messages]
-                user_message = LLMMessage(role="user", content=adapted.input_content)
-
-                pipeline_manager = AgentPipelineManager(
-                    system_message=LLMMessage(role="system", content=rendered_system_prompt),
-                    user_message=user_message,
-                    history=history_messages,
-                    tool_executor=tool_executor,
-                ).add_standard_processors(
-                    app_context=self.context,
-                    agent_config=agent_config,
-                    dependencies=dependencies or [],
-                    runtime_workspace=runtime_workspace,
+            async with self.ai_provider:
+                callbacks = PersistingAgentCallbacks(
+                    generator_manager=generator_manager,
                     session_manager=session_manager,
-                    prompt_variables=prompt_variables,
+                    trace_id=trace_manager.force_trace_id,
+                    run_id=execution.run_id,
+                    turn_id=turn_id,
+                    usage_accumulator=usage_accumulator,
+                    run_input=run_input,
+                    message_ids=message_ids,
+                    interrupt_id_builder=self.build_interrupt_id,
                 )
 
-                final_messages = await pipeline_manager.build_context()
-                final_tools = await pipeline_manager.build_skill()
+                if adapted is None or tool_executor is None or agent_instance is None:
+                    raise ServiceException("Agent background task missing runtime prerequisites.")
 
-                module_context = await self.module_service.get_runtime_context(
-                    version_id=llm_module_version.id,
-                    actor=self.context.actor,
-                    workspace=runtime_workspace
-                )
-                model_context_window = self._resolve_model_context_window(module_context.version.attributes)
+                session = session_manager.session if session_manager and session_manager.session else None
+                lock_ctx = self._session_lock(session.uuid) if session else nullcontext()
 
-                run_config = LLMRunConfig(
-                    model=module_context.version.name,
-                    temperature=agent_config.model_params.temperature,
-                    top_p=agent_config.model_params.top_p,
-                    presence_penalty=agent_config.model_params.presence_penalty,
-                    frequency_penalty=agent_config.model_params.frequency_penalty,
-                    max_context_window=model_context_window,
-                    max_tokens=agent_config.io_config.max_response_tokens,
-                    enable_thinking=agent_config.io_config.enable_deep_thinking,
-                    thinking_budget=agent_config.io_config.max_thinking_tokens,
-                    tools=final_tools,
-                    stream=True
-                )
+                async with lock_ctx:
+                    if session:
+                        await self.db.refresh(session)
+                        preload_turns = ShortContextProcessor.compute_fetch_limit(
+                            total_turns=session.turn_count,
+                            max_turns=agent_config.io_config.history_turns,
+                        )
+                        if session.turn_count > 0:
+                            await session_manager.preload_recent_messages(max(1, preload_turns))
+                        await self._enforce_pending_tool_results(
+                            session_manager=session_manager,
+                            resume_tool_call_ids=adapted.resume_tool_call_ids,
+                        )
+                        if adapted.resume_messages:
+                            self._buffer_protocol_history_messages(
+                                session_manager=session_manager,
+                                history=adapted.resume_messages,
+                            )
 
-                if session:
-                    session_manager.buffer_message(
-                        role=AgentMessageRole.USER,
-                        message_uuid=message_ids.user_message_id if message_ids else None,
-                        text_content=user_message.content if isinstance(user_message.content, str) else None,
-                        content_parts=user_message.content if isinstance(user_message.content, list) else None,
+                    prompt_variables = await self.agent_memory_var_service.get_runtime_object(
+                        agent_instance.version_id,
+                        self.context.actor.id,
+                        session.uuid if session else None,
+                    )
+                    rendered_system_prompt = self.prompt_template.render(
+                        agent_instance.system_prompt,
+                        prompt_variables,
+                    )
+                    history_messages = [*adapted.custom_history, *adapted.resume_messages]
+                    user_message = LLMMessage(role="user", content=adapted.input_content)
+
+                    pipeline_manager = AgentPipelineManager(
+                        system_message=LLMMessage(role="system", content=rendered_system_prompt),
+                        user_message=user_message,
+                        history=history_messages,
+                        tool_executor=tool_executor,
+                    ).add_standard_processors(
+                        app_context=self.context,
+                        agent_config=agent_config,
+                        dependencies=dependencies or [],
+                        runtime_workspace=runtime_workspace,
+                        session_manager=session_manager,
+                        prompt_variables=prompt_variables,
                     )
 
-                await self.execution_ledger_service.mark_running(execution, trace_id=trace_manager.force_trace_id)
+                    final_messages = await pipeline_manager.build_context()
+                    final_tools = await pipeline_manager.build_skill()
 
-                async with trace_manager as root_span:
-                    try:
-                        agent_input = AgentInput(messages=final_messages)
-                        root_span.attributes = AgentAttributes(
-                            meta=AgentMeta(config=run_config),
-                            inputs=agent_input
+                    module_context = await self.module_service.get_runtime_context(
+                        version_id=llm_module_version.id,
+                        actor=self.context.actor,
+                        workspace=runtime_workspace
+                    )
+                    model_context_window = self._resolve_model_context_window(module_context.version.attributes)
+
+                    run_config = LLMRunConfig(
+                        model=module_context.version.name,
+                        temperature=agent_config.model_params.temperature,
+                        top_p=agent_config.model_params.top_p,
+                        presence_penalty=agent_config.model_params.presence_penalty,
+                        frequency_penalty=agent_config.model_params.frequency_penalty,
+                        max_context_window=model_context_window,
+                        max_tokens=agent_config.io_config.max_response_tokens,
+                        enable_thinking=agent_config.io_config.enable_deep_thinking,
+                        thinking_budget=agent_config.io_config.max_thinking_tokens,
+                        tools=final_tools,
+                        stream=True
+                    )
+
+                    if session:
+                        session_manager.buffer_message(
+                            role=AgentMessageRole.USER,
+                            message_uuid=message_ids.user_message_id if message_ids else None,
+                            text_content=user_message.content if isinstance(user_message.content, str) else None,
+                            content_parts=user_message.content if isinstance(user_message.content, list) else None,
                         )
-                        result = await self.ai_provider.execute_agent_with_billing(
-                            runtime_workspace=runtime_workspace,
-                            module_context=module_context,
-                            agent_input=agent_input,
-                            run_config=run_config,
-                            tool_executor=pipeline_manager.tool_executor,
-                            callbacks=callbacks,
-                            usage_accumulator=usage_accumulator
-                        )
-                        final_result = result
-                        root_span.set_output(result)
-                    except Exception:
-                        if callbacks.final_result:
-                            root_span.set_output(callbacks.final_result)
-                        raise
-                    finally:
-                        if session:
-                            await session_manager.commit(agent_config.deep_memory)
-                            pending_post_commit_dispatch = True
+
+                    await self.execution_ledger_service.mark_running(execution, trace_id=trace_manager.force_trace_id)
+
+                    async with trace_manager as root_span:
+                        try:
+                            agent_input = AgentInput(messages=final_messages)
+                            root_span.attributes = AgentAttributes(
+                                meta=AgentMeta(config=run_config),
+                                inputs=agent_input
+                            )
+                            result = await self.ai_provider.execute_agent_with_billing(
+                                runtime_workspace=runtime_workspace,
+                                module_context=module_context,
+                                agent_input=agent_input,
+                                run_config=run_config,
+                                tool_executor=pipeline_manager.tool_executor,
+                                callbacks=callbacks,
+                                usage_accumulator=usage_accumulator
+                            )
+                            final_result = result
+                            root_span.set_output(result)
+                        except Exception:
+                            if callbacks.final_result:
+                                root_span.set_output(callbacks.final_result)
+                            raise
+                        finally:
+                            if session:
+                                await session_manager.commit(agent_config.deep_memory)
+                                pending_post_commit_dispatch = True
 
             outcome = (callbacks.final_result.outcome if callbacks and callbacks.final_result else None) or getattr(final_result, "outcome", None)
             status = ResourceExecutionStatus.SUCCEEDED
