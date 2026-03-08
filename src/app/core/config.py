@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     APP_ENV: str = "production"
     APP_HOST: str = "127.0.0.1"
     APP_PORT: int = 8000
+    PERF_OBSERVABILITY_ENABLED: bool = True
+    PERF_OBSERVABILITY_SAMPLE_RATE: float = 1.0
+    PERF_OBSERVABILITY_SLOW_SQL_MS: int = 50
+    PYINSTRUMENT_PROFILING_ENABLED: bool = True
+    PYINSTRUMENT_PROFILE_DIR: str = "logs/pyinstrument"
+    PYINSTRUMENT_INTERVAL_SECONDS: float = 0.001
+    PYINSTRUMENT_TRIGGER_QUERY: str = "profile"
+    PYINSTRUMENT_TRIGGER_HEADER: str = "X-Profile"
 
     SITE_CURRENCY: Currency = Field(..., description="The authoritative currency for this site deployment.")
 

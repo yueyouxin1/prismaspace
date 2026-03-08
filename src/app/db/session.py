@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 # 1. [核心变更] 从中央配置模块导入 'settings' 实例
 #    不再从任何地方导入硬编码的 'mysql' 字典
 from app.core.config import settings
+from app.observability import install_sqlalchemy_observers
 
 # 2. [增强] 为数据库引擎添加生产环境推荐的配置
 #    这能显著提升数据库连接的稳定性和性能
@@ -18,6 +19,7 @@ engine = create_async_engine(
     # pool_size=10,          # [可选] 连接池中的常备连接数，可根据负载调整
     # max_overflow=20,       # [可选] 连接池在高并发时可额外创建的最大连接数
 )
+install_sqlalchemy_observers(engine.sync_engine)
 
 # 3. [不变] SessionLocal 和 get_db 的定义保持不变，它们已经是最佳实践
 SessionLocal = sessionmaker(

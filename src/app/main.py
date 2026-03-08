@@ -30,6 +30,7 @@ from app.system.vectordb.manager import SystemVectorManager
 from app.system.resource.workflow.node_def_manager import NodeDefManager
 from app.engine.vector.main import VectorEngineManager, VectorEngineConfig
 from app.middleware import AuthenticationMiddleware
+from app.observability import PerformanceObservabilityMiddleware, PyInstrumentProfilingMiddleware
 from app.schemas.common import JsonResponse, JsonFaildResponse
 
 @asynccontextmanager
@@ -99,6 +100,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # 设置允许跨域的http方法，比如 get、post、put等。
     allow_headers=["*"])  #允许跨域的headers，可以用来鉴别来源等作用。
+
+if settings.PERF_OBSERVABILITY_ENABLED:
+    app.add_middleware(PerformanceObservabilityMiddleware)
+
+if settings.PYINSTRUMENT_PROFILING_ENABLED:
+    app.add_middleware(PyInstrumentProfilingMiddleware)
 
 app.include_router(router)
 

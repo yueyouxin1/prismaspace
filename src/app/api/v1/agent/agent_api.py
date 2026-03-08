@@ -10,6 +10,7 @@ from app.api.dependencies.context import AuthContextDep
 from app.api.dependencies.ws_auth import get_ws_auth, AuthContext
 from app.schemas.common import JsonResponse
 from app.schemas.protocol import RunAgentInputExt, RunEventsResponse
+from app.observability import observe_agent_stream_event
 from app.services.resource.agent.agent_service import AgentService
 from .ws_handler import AgentSessionHandler
 from app.services.exceptions import ServiceException
@@ -53,6 +54,7 @@ async def stream_agent(
             thread_id = getattr(run_result, "thread_id", None) or thread_id
             run_id = getattr(run_result, "run_id", run_id)
             async for event in run_result.generator:
+                observe_agent_stream_event(event)
                 yield _encode(event)
         except GeneratorExit:
             if callable(cancel_fn):

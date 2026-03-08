@@ -1,7 +1,7 @@
 # src/app/services/resource/agent/types/agent.py
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from app.schemas.resource.agent.agent_schemas import AgentConfig
 from app.utils.async_generator import AsyncGeneratorManager
@@ -29,3 +29,9 @@ class AgentRunResult:
     trace_id: Optional[str]
     thread_id: str
     cancel: Optional[Callable[[], None]] = None
+
+
+@dataclass
+class PreparedAgentRun:
+    result: AgentRunResult
+    background_task_kwargs: dict[str, Any]

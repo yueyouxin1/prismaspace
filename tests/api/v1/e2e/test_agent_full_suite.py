@@ -167,7 +167,7 @@ class TestAgentFullSuite:
         }
         
         # 使用 request 消费整个流
-        async with client.stream("POST", f"/api/v1/agent/{agent_instance.uuid}/sse", json=payload, headers=headers) as response:
+        async with client.stream("POST", f"/api/v1/agent/{agent_instance.uuid}/sse?profile=1", json=payload, headers=headers) as response:
             assert response.status_code == status.HTTP_200_OK
             assert "text/event-stream" in response.headers["content-type"]
             

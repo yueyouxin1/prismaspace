@@ -17,6 +17,41 @@ from app.utils.async_generator import AsyncGeneratorManager
 pytestmark = pytest.mark.asyncio
 
 
+async def test_async_execute_delegates_to_runtime_runner(monkeypatch):
+    service = object.__new__(AgentService)
+    sentinel = object()
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, *, base_context, db_session_factory):
+            captured["base_context"] = base_context
+            captured["db_session_factory"] = db_session_factory
+
+        async def start(self, **kwargs):
+            captured["start_kwargs"] = kwargs
+            return sentinel
+
+    from app.services.resource.agent import runtime_runner as runtime_runner_module
+
+    monkeypatch.setattr(runtime_runner_module, "AgentRuntimeRunner", FakeRunner)
+
+    service.context = SimpleNamespace(name="ctx")
+    service._db_session_factory = object()
+
+    result = await service.async_execute(
+        instance_uuid="agent-1",
+        run_input=SimpleNamespace(),
+        actor=SimpleNamespace(id=1),
+        runtime_workspace=SimpleNamespace(id=9),
+    )
+
+    assert result is sentinel
+    assert captured["base_context"] is service.context
+    assert captured["db_session_factory"] is service._db_session_factory
+    assert captured["start_kwargs"]["instance_uuid"] == "agent-1"
+    assert captured["start_kwargs"]["runtime_workspace"].id == 9
+
+
 async def test_background_task_locks_preflight_and_commits_before_terminal_event(monkeypatch):
     service = object.__new__(AgentService)
     order: list[str] = []
@@ -118,7 +153,6 @@ async def test_background_task_locks_preflight_and_commits_before_terminal_event
         mark_running=AsyncMock(side_effect=fake_mark_running),
         mark_finished=AsyncMock(side_effect=fake_mark_finished),
     )
-    service._close_owned_runtime_session = AsyncMock()
 
     session_manager = SimpleNamespace(
         session=SimpleNamespace(uuid="session-1", turn_count=1),
