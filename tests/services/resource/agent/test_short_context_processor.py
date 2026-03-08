@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models.interaction.chat import MessageRole
+from app.models.resource.agent import AgentMessageRole
 from app.services.resource.agent.agent_session_manager import AgentSessionManager
 from app.services.resource.agent.processors import (
     AgentPipelineContext,
@@ -17,7 +17,7 @@ from app.engine.model.llm import LLMMessage
 @pytest.mark.asyncio
 async def test_short_context_processor_filters_activity_messages_from_llm_history():
     activity_message = SimpleNamespace(
-        role=MessageRole.ACTIVITY,
+        role=AgentMessageRole.ACTIVITY,
         turn_id="turn-1",
         text_content="searching",
         content=None,
@@ -26,7 +26,7 @@ async def test_short_context_processor_filters_activity_messages_from_llm_histor
         tool_call_id=None,
     )
     assistant_message = SimpleNamespace(
-        role=MessageRole.ASSISTANT,
+        role=AgentMessageRole.ASSISTANT,
         turn_id="turn-1",
         text_content="answer",
         content=None,
@@ -58,7 +58,7 @@ async def test_short_context_processor_filters_activity_messages_from_llm_histor
 async def test_short_context_processor_respects_single_turn_history_setting():
     latest_turn_messages = [
         SimpleNamespace(
-            role=MessageRole.USER,
+            role=AgentMessageRole.USER,
             turn_id="turn-3",
             text_content="latest question",
             content=None,
@@ -67,7 +67,7 @@ async def test_short_context_processor_respects_single_turn_history_setting():
             tool_call_id=None,
         ),
         SimpleNamespace(
-            role=MessageRole.ASSISTANT,
+            role=AgentMessageRole.ASSISTANT,
             turn_id="turn-3",
             text_content="latest answer",
             content=None,

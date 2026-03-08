@@ -1,21 +1,20 @@
 import logging
 import json
 import asyncio
+import re
 from typing import List, Dict, Any, Optional, Callable, Set, Union, Tuple
 from dataclasses import dataclass, field
 
 from app.core.context import AppContext
-from app.models import User, Workspace, ResourceRef
-from app.models.interaction.chat import ChatMessage, MessageRole
-from app.models.resource.agent import AgentMemoryVar, AgentContextSummary
-from app.models.resource.tool import Tool
+from app.models import Workspace, ResourceRef
+from app.models.resource.agent import AgentMemoryVar, AgentContextSummary, AgentMessageRole
 from app.engine.model.llm import LLMMessage, LLMTool, LLMToolFunction
 from app.engine.agent import BaseToolExecutor, ToolExecutionInterrupt
 from app.schemas.resource.agent.agent_schemas import AgentConfig, AgentRAGConfig, DeepMemoryConfig
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig, KnowledgeBaseExecutionRequest, KnowledgeBaseExecutionParams, SearchResultChunk
 from app.schemas.resource.execution_schemas import GenericExecutionRequest
-from app.services.exceptions import ServiceException, NotFoundError
-from app.services.resource.agent.message_content import chat_message_to_text
+from app.services.exceptions import ServiceException
+from app.services.resource.agent.message_content import agent_message_to_text
 
 # Lazy imports to avoid circular dependency loops during initialization
 from app.services.resource.agent.agent_session_manager import AgentSessionManager
@@ -282,46 +281,63 @@ class DependencySkillsProcessor(BaseSkillProcessor):
 
 class DeepMemorySkillsProcessor(BaseSkillProcessor):
     """
-    [Agent专用] 负责加载长期记忆扩展工具。
-    允许模型通过 ID 反查详细的对话历史片段。
+    [L2专用] 负责加载摘要上下文扩展工具。
+    允许模型针对 Conversation Summaries 中的 ContextID 拉取原始轮次内容。
     """
-    def __init__(self, context: AppContext, config: DeepMemoryConfig):
+    def __init__(
+        self,
+        context: AppContext,
+        config: DeepMemoryConfig,
+        session_manager: Optional[AgentSessionManager],
+    ):
         self.context = context
         self.config = config
-        
-        from app.services.resource.agent.memory.deep.long_term_context_service import LongTermContextService
-        self.long_term_service = LongTermContextService(context)
+        self.session_manager = session_manager
+
+        from app.dao.resource.agent.session_dao import AgentMessageDao
+        self.message_dao = AgentMessageDao(context.db)
 
     async def process(self, tool_executor: BaseToolExecutor) -> None:
-        if not self.config.enabled or not self.config.enable_summarization:
+        if (
+            not self.config.enabled
+            or not self.config.enable_summarization
+            or not self.session_manager
+            or not self.session_manager.session
+        ):
             return
 
-        # 定义本地函数
+        # L1 recall 已直接注入完整原始轮次；这里仅为 L2 summary ContextID 提供原文展开。
         async def expand_context_fn(context_id: str):
-            msgs = await self.long_term_service.retrieve_by_turn_id_direct(
-                context_id,
+            msgs = await self.message_dao.get_active_messages_for_turn_scope(
+                turn_id=context_id,
                 session_uuid=self.session_manager.session.uuid,
                 agent_instance_id=self.session_manager.agent_instance.id,
             )
             if not msgs:
                 return "Context not found or expired."
-            return "\n".join([f"{m.role.value}: {chat_message_to_text(m)}" for m in msgs])
+            return "\n".join([f"{m.role.value}: {agent_message_to_text(m)}" for m in msgs])
         
-        # 定义 Tool Schema
         tool_def = LLMTool(
             type="function",
             function=LLMToolFunction(
-                name="expand_long_term_context",
-                description="Retrieve full conversation details for a specific past turn using its Context ID.",
+                name="expand_summary_context",
+                description=(
+                    "For a ContextID from 'Conversation Summaries', retrieve the full original "
+                    "conversation turn behind that summary."
+                ),
                 parameters={
                     "type": "object", 
-                    "properties": {"context_id": {"type": "string"}}, 
+                    "properties": {
+                        "context_id": {
+                            "type": "string",
+                            "description": "The ContextID taken from 'Conversation Summaries'.",
+                        }
+                    }, 
                     "required": ["context_id"]
                 }
             )
         )
         
-        # 注册本地函数
         tool_executor.register_local_function(tool_def, expand_context_fn)
 
 class MemoryVarSkillsProcessor(BaseSkillProcessor):
@@ -622,12 +638,12 @@ class ShortContextProcessor(BaseContextProcessor):
             if m.turn_id:
                 turn_ids.add(m.turn_id)
 
-            if m.role == MessageRole.ACTIVITY:
+            if m.role == AgentMessageRole.ACTIVITY:
                 # Activity is a frontend-only channel and must not pollute model context.
                 continue
 
             role_value = m.role.value if m.role.value in {"system", "user", "assistant", "tool"} else "system"
-            content_value = chat_message_to_text(m)
+            content_value = agent_message_to_text(m)
             if m.role.value in {"developer", "reasoning", "activity"} and content_value:
                 content_value = f"[{m.role.value.upper()}] {content_value}"
 
@@ -1023,7 +1039,7 @@ class DeepMemoryProcessor(BaseContextProcessor):
                         turn_id = turn[0].turn_id
                         if turn_id:
                             # 注意：这里我们 NOT update ctx.exclude_turn_ids
-                            turn_content = "\n".join([f"{msg.role.value}: {chat_message_to_text(msg)}" for msg in turn])
+                            turn_content = "\n".join([f"{msg.role.value}: {agent_message_to_text(msg)}" for msg in turn])
                             blocks.append(f"--- History (ID: {turn_id}) ---\n{turn_content}")
                     if blocks:
                         full_recall_text = "\n### Recalled Conversation:\n" + "\n\n".join(blocks)
@@ -1058,4 +1074,8 @@ class DeepMemoryProcessor(BaseContextProcessor):
         for s in summaries:
             date_str = s.created_at.strftime('%Y-%m-%d') if s.created_at else "?"
             lines.append(f"- [{date_str}] [ContextID:{s.turn_id}] {s.content}")
-        return "### Conversation Summaries:\n" + "\n".join(lines)
+        return (
+            "### Conversation Summaries:\n"
+            "If more detail is needed for a ContextID, use the tool `expand_summary_context`.\n"
+            + "\n".join(lines)
+        )

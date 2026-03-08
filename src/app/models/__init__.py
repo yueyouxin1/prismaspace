@@ -83,4 +83,3 @@ from .asset import (
 )
 
 from .resource import *
-from .interaction import *

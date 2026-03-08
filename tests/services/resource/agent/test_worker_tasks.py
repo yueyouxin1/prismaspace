@@ -7,6 +7,7 @@ import pytest
 from app.schemas.resource.agent.agent_schemas import AgentConfig
 from app.worker import CRON_JOBS, TASK_FUNCTIONS, WorkerSettings
 from app.worker.tasks import agent as agent_tasks
+import app.worker.main as worker_main
 
 
 class _FakeExecuteResult:
@@ -114,3 +115,44 @@ def test_worker_registry_exposes_agent_tasks_and_cron_jobs():
     assert "summarize_turn_task" in task_names
     assert WorkerSettings.cron_jobs is CRON_JOBS
     assert CRON_JOBS
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_initializes_system_vector_collections(monkeypatch):
+    fake_redis_service = SimpleNamespace(
+        initialize=AsyncMock(),
+        close=AsyncMock(),
+    )
+    fake_vector_manager = SimpleNamespace(
+        startup=AsyncMock(),
+        shutdown=AsyncMock(),
+    )
+    fake_system_vector_manager = SimpleNamespace(
+        initialize_system_collections=AsyncMock(),
+    )
+    fake_pool = SimpleNamespace(aclose=AsyncMock())
+    fake_db_session = SimpleNamespace()
+
+    monkeypatch.setattr(worker_main, "RedisService", lambda: fake_redis_service)
+    monkeypatch.setattr(worker_main, "VectorEngineManager", lambda configs: fake_vector_manager)
+    monkeypatch.setattr(worker_main, "create_pool", AsyncMock(return_value=fake_pool))
+    monkeypatch.setattr(
+        worker_main,
+        "SystemVectorManager",
+        lambda db_session, vector_manager: fake_system_vector_manager,
+    )
+    monkeypatch.setattr(
+        worker_main,
+        "SessionLocal",
+        lambda: _FakeSessionContext(fake_db_session),
+    )
+
+    ctx = {}
+    await worker_main.startup(ctx)
+
+    fake_redis_service.initialize.assert_awaited_once()
+    fake_vector_manager.startup.assert_awaited_once()
+    fake_system_vector_manager.initialize_system_collections.assert_awaited_once()
+    assert ctx["db_session_factory"] is worker_main.SessionLocal
+    assert ctx["vector_manager"] is fake_vector_manager
+    assert ctx["arq_pool"] is fake_pool

@@ -94,7 +94,7 @@ class AgentSessionHandler:
                 run_id=run_input.run_id,
                 thread_id=run_input.thread_id,
                 code="AG_UI_MISSING_AGENT_UUID",
-                message="Missing agent uuid in forwardedProps.agentUuid/agent_uuid",
+                message="Missing websocket-only agent uuid in forwardedProps.platform.agentUuid",
             )
             return
 
@@ -195,10 +195,7 @@ class AgentSessionHandler:
 
     @staticmethod
     def _extract_agent_uuid(run_input: RunAgentInputExt) -> Optional[str]:
-        props = run_input.forwarded_props
-        if isinstance(props, dict):
-            for key in ("agentUuid", "agent_uuid", "instanceUuid", "instance_uuid"):
-                value = props.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value
-        return None
+        platform = run_input.platform_props
+        if not platform:
+            return None
+        return platform.agent_uuid

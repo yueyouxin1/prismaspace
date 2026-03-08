@@ -12,11 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.core.context import AppContext
 from app.models.resource import Resource
-from app.models.resource.agent import Agent
-from app.models.interaction.chat import ChatSession
+from app.models.resource.agent import Agent, AgentSession
 from app.dao.resource.agent.agent_dao import AgentDao
 from app.dao.module.service_module_dao import ServiceModuleDao
-from app.dao.interaction.chat_dao import ChatSessionDao
 from app.services.resource.agent.memory.agent_memory_var_service import AgentMemoryVarService
 from app.schemas.resource.agent.agent_memory_schemas import AgentMemoryVarCreate
 from app.services.permission.permission_evaluator import PermissionEvaluator
@@ -286,7 +284,7 @@ class TestAgentFullSuite:
                 "messages": [{"id": "u1", "role": "user", "content": "Hello WS"}],
                 "tools": [],
                 "context": [],
-                "forwardedProps": {"agentUuid": agent_instance.uuid},
+                "forwardedProps": {"platform": {"agentUuid": agent_instance.uuid}},
             })
             
             received_content = ""
@@ -316,7 +314,7 @@ class TestAgentFullSuite:
                 "messages": [{"id": "u2", "role": "user", "content": "Go"}],
                 "tools": [],
                 "context": [],
-                "forwardedProps": {"agentUuid": agent_instance.uuid},
+                "forwardedProps": {"platform": {"agentUuid": agent_instance.uuid}},
             })
             
             # 立即发送 Stop
@@ -416,7 +414,7 @@ class TestAgentFullSuite:
                 "messages": [{"id": "u1", "role": "user", "content": "hi"}],
                 "tools": [],
                 "context": [],
-                "forwardedProps": {"sessionMode": "stateless"},
+                "forwardedProps": {"platform": {"sessionMode": "stateless"}},
             },
             headers=headers
         )
@@ -468,7 +466,7 @@ class TestAgentFullSuite:
                 "messages": [{"id": "u1", "role": "user", "content": "Cost me money"}],
                 "tools": [],
                 "context": [],
-                "forwardedProps": {"sessionMode": "stateless"},
+                "forwardedProps": {"platform": {"sessionMode": "stateless"}},
             },
             headers=headers
         )
@@ -526,7 +524,7 @@ class TestAgentFullSuite:
         
         # 2. [关键修复] 预先在 DB 中创建 Session，防止 404
         session_uuid = str(uuid.uuid4())
-        session = ChatSession(
+        session = AgentSession(
             uuid=session_uuid,
             user_id=registered_user_with_pro.user.id,
             agent_instance_id=agent_instance.id,

@@ -2,50 +2,29 @@
 
 from typing import List, Optional, Dict, Any
 from sqlalchemy import func
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import AppContext
 from app.models import User, ResourceInstance
-from app.models.interaction.chat import ChatSession, ChatMessage, MessageRole
-from app.dao.interaction.chat_dao import ChatSessionDao, ChatMessageDao
+from app.models.resource.agent import AgentSession, AgentMessage, AgentMessageRole
+from app.dao.resource.agent.session_dao import AgentSessionDao, AgentMessageDao
 from app.dao.resource.resource_dao import ResourceInstanceDao
 from app.services.resource.agent.memory.deep.context_summary_service import ContextSummaryService
-from app.schemas.interaction.chat_schemas import ChatSessionCreate, ChatSessionRead, ChatMessageRead
-from app.engine.model.llm import LLMMessage
+from app.schemas.resource.agent.session_schemas import AgentSessionCreate, AgentSessionRead, AgentMessageRead
 from app.services.base_service import BaseService
 from app.services.exceptions import NotFoundError, PermissionDeniedError, ServiceException
 
-class SessionService(BaseService):
+class AgentSessionService(BaseService):
     """
     [Core Service] 负责管理 Agent 会话及其上下文生命周期。
     """
     def __init__(self, context: AppContext):
         self.context = context
         self.db = context.db
-        self.session_dao = ChatSessionDao(context.db)
-        self.message_dao = ChatMessageDao(context.db)
+        self.session_dao = AgentSessionDao(context.db)
+        self.message_dao = AgentMessageDao(context.db)
         self.instance_dao = ResourceInstanceDao(context.db)
         self.summary_service = ContextSummaryService(context)
 
-    async def _sync_message_count(self, session: ChatSession) -> int:
-        """
-        [Internal] 强制同步数据库行数到 Session 实体缓存字段。
-        返回最新的真实数量。
-        """
-        real_count = await self.message_dao.get_active_count(session.id)
-        
-        # 只有当数量不一致时才触发 DB 更新，减少无谓写操作
-        if session.message_count != real_count:
-            session.message_count = real_count
-        
-        return real_count
-
-    async def _sync_turn_count(self, session: ChatSession) -> int:
-        real_count = await self.message_dao.get_active_turn_count(session.id)
-        if session.turn_count != real_count:
-            session.turn_count = real_count
-        return real_count
-
-    async def create_session(self, create_data: ChatSessionCreate, actor: User) -> ChatSessionRead:
+    async def create_session(self, create_data: AgentSessionCreate, actor: User) -> AgentSessionRead:
         """用户创建一个新的会话"""
         instance = await self.instance_dao.get_by_uuid(create_data.agent_instance_uuid)
         if not instance:
@@ -56,7 +35,7 @@ class SessionService(BaseService):
         workspace = instance.resource.workspace
         await self.context.perm_evaluator.ensure_can(["resource:execute"], target=workspace)
 
-        session = ChatSession(
+        session = AgentSession(
             user_id=actor.id,
             agent_instance_id=instance.id,
             title=create_data.title or "New Chat"
@@ -66,7 +45,7 @@ class SessionService(BaseService):
         # 直接构建响应，避免依赖 ORM 关系懒加载/别名路径解析。
         return self._to_session_read(session, create_data.agent_instance_uuid)
 
-    async def list_sessions(self, agent_instance_uuid: str, page: int, limit: int, actor: User) -> List[ChatSessionRead]:
+    async def list_sessions(self, agent_instance_uuid: str, page: int, limit: int, actor: User) -> List[AgentSessionRead]:
         """列出当前用户在某个 Agent 版本下的历史会话"""
         instance = await self.instance_dao.get_by_uuid(agent_instance_uuid)
         if not instance:
@@ -80,7 +59,7 @@ class SessionService(BaseService):
         )
         return [self._to_session_read(session, agent_instance_uuid) for session in sessions]
 
-    async def rename_session(self, session_uuid: str, title: str, actor: User) -> ChatSessionRead:
+    async def rename_session(self, session_uuid: str, title: str, actor: User) -> AgentSessionRead:
         session = await self.get_session(session_uuid, actor)
         cleaned_title = title.strip()
         if not cleaned_title:
@@ -91,8 +70,8 @@ class SessionService(BaseService):
         instance_uuid = instance.uuid if instance else ""
         return self._to_session_read(session, instance_uuid)
 
-    def _to_session_read(self, session: ChatSession, agent_instance_uuid: str) -> ChatSessionRead:
-        return ChatSessionRead.model_validate({
+    def _to_session_read(self, session: AgentSession, agent_instance_uuid: str) -> AgentSessionRead:
+        return AgentSessionRead.model_validate({
             "uuid": session.uuid,
             "title": session.title,
             "agent_instance_uuid": agent_instance_uuid,
@@ -101,11 +80,11 @@ class SessionService(BaseService):
             "created_at": session.created_at,
         })
 
-    async def get_session(self, session_uuid: str, actor: User) -> ChatSession:
+    async def get_session(self, session_uuid: str, actor: User) -> AgentSession:
         """[Internal] 获取并鉴权会话实体"""
         session = await self.session_dao.get_by_uuid(session_uuid)
         if not session:
-            raise NotFoundError("Chat session not found")
+            raise NotFoundError("Agent session not found")
         if session.user_id != actor.id:
             raise PermissionDeniedError("Access denied to this session")
         if session.is_archived:
@@ -117,7 +96,7 @@ class SessionService(BaseService):
         session_uuid: str,
         agent_instance: ResourceInstance,
         actor: User,
-    ) -> ChatSession:
+    ) -> AgentSession:
         session = await self.session_dao.get_by_uuid(session_uuid)
         if session:
             if session.user_id != actor.id:
@@ -128,7 +107,7 @@ class SessionService(BaseService):
                 raise ServiceException("Session bound to another agent instance.")
             return session
 
-        created = ChatSession(
+        created = AgentSession(
             uuid=session_uuid,
             user_id=actor.id,
             agent_instance_id=agent_instance.id,
@@ -138,16 +117,16 @@ class SessionService(BaseService):
         await self.db.flush()
         return created
 
-    async def get_session_history(self, session_uuid: str, cursor: int, limit: int, actor: User) -> List[ChatMessageRead]:
+    async def get_session_history(self, session_uuid: str, cursor: int, limit: int, actor: User) -> List[AgentMessageRead]:
         """获取会话的消息历史 (用于前端展示)"""
         session = await self.get_session(session_uuid, actor)
         messages = await self.message_dao.get_history_for_frontend(session.id, cursor, limit)
-        return [ChatMessageRead.model_validate(m) for m in messages]
+        return [AgentMessageRead.model_validate(m) for m in messages]
 
     async def append_message(
         self, 
-        session: ChatSession, 
-        role: MessageRole, 
+        session: AgentSession, 
+        role: AgentMessageRole, 
         message_uuid: Optional[str] = None,
         text_content: str = None,
         content_parts: Optional[List[Dict[str, Any]]] = None,
@@ -162,11 +141,11 @@ class SessionService(BaseService):
         trace_id: str = None,
         token_count: int = 0,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> ChatMessage:
+    ) -> AgentMessage:
         """
         [Atomic] 持久化消息。
         """
-        msg = ChatMessage(
+        msg = AgentMessage(
             uuid=message_uuid,
             session_id=session.id,
             role=role,
@@ -191,9 +170,9 @@ class SessionService(BaseService):
 
         self.db.add(msg)
 
-        session.message_count = ChatSession.message_count + 1
+        session.message_count = AgentSession.message_count + 1
         if turn_id and turn_id not in existing_turn_ids:
-            session.turn_count = ChatSession.turn_count + 1
+            session.turn_count = AgentSession.turn_count + 1
         
         session.updated_at = func.now()
 
@@ -203,7 +182,7 @@ class SessionService(BaseService):
 
     async def batch_append_messages(
             self, 
-            session: ChatSession, 
+            session: AgentSession, 
             messages_data: List[Dict[str, Any]]
         ):
             """
@@ -219,7 +198,7 @@ class SessionService(BaseService):
                 if isinstance(turn_id, str) and turn_id
             }
             for data in messages_data:
-                msg = ChatMessage(
+                msg = AgentMessage(
                     uuid=data.get('message_uuid'),
                     session_id=session.id,
                     role=data['role'],
@@ -248,10 +227,10 @@ class SessionService(BaseService):
                 existing_turn_ids = set()
 
             self.db.add_all(orm_messages)
-            session.message_count = ChatSession.message_count + len(orm_messages)
+            session.message_count = AgentSession.message_count + len(orm_messages)
             new_turn_count = len(incoming_turn_ids - existing_turn_ids)
             if new_turn_count > 0:
-                session.turn_count = ChatSession.turn_count + new_turn_count
+                session.turn_count = AgentSession.turn_count + new_turn_count
             session.updated_at = func.now()
             
             await self.db.flush()
@@ -317,9 +296,9 @@ class SessionService(BaseService):
                 mode=mode
             )
             if active_messages_in_turn == 1:
-                msg.session.turn_count = ChatSession.turn_count - 1
+                msg.session.turn_count = AgentSession.turn_count - 1
 
-        msg.session.message_count = ChatSession.message_count - 1  
+        msg.session.message_count = AgentSession.message_count - 1  
         await self.db.flush()
 
     async def delete_session(self, session_uuid: str, actor: User):
@@ -330,7 +309,7 @@ class SessionService(BaseService):
         await self.summary_service.archive_session_summaries(session.uuid)
         await self.db.flush()
 
-    async def get_recent_messages(self, session_id: int, limit: int) -> List[ChatMessage]:
+    async def get_recent_messages(self, session_id: int, limit: int) -> List[AgentMessage]:
         """
         [Raw Data] 仅获取最近 N 个业务轮次的原始数据库消息。
         """

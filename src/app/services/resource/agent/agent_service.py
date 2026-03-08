@@ -23,13 +23,11 @@ from app.models import (
     ResourceInstance,
     ResourceRef,
     VersionStatus,
-    ChatMessage,
     ServiceModuleVersion,
     ResourceExecution,
     ResourceExecutionStatus,
 )
-from app.models.resource.agent import Agent
-from app.models.interaction.chat import ChatSession, MessageRole
+from app.models.resource.agent import Agent, AgentMessage, AgentMessageRole
 from app.dao.resource.agent.agent_dao import AgentDao
 from app.dao.module.service_module_dao import ServiceModuleVersionDao
 from app.dao.resource.resource_ref_dao import ResourceRefDao
@@ -463,7 +461,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.tool_call_index_states.clear()
 
         if self.session_manager:
-            self.session_manager.buffer_message(role=MessageRole.ASSISTANT, tool_calls=tool_calls_data)
+            self.session_manager.buffer_message(role=AgentMessageRole.ASSISTANT, tool_calls=tool_calls_data)
 
     async def on_tool_call_chunk_generated(self, chunk: LLMToolCallChunk):
         index_state = self.tool_call_index_states.setdefault(
@@ -518,7 +516,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         )
         if step.thought and self.session_manager:
             self.session_manager.buffer_message(
-                role=MessageRole.REASONING,
+                role=AgentMessageRole.REASONING,
                 text_content=step.thought,
                 reasoning_content=step.thought,
                 activity_type="tool_call_thought",
@@ -547,7 +545,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         )
         if self.session_manager:
             self.session_manager.buffer_message(
-                role=MessageRole.TOOL,
+                role=AgentMessageRole.TOOL,
                 tool_call_id=step.action.id,
                 text_content=output_text,
             )
@@ -621,7 +619,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if not text_content and not content_parts and not reasoning_content and not encrypted_value:
             return
         self.session_manager.buffer_message(
-            role=MessageRole.ASSISTANT,
+            role=AgentMessageRole.ASSISTANT,
             message_uuid=self.assistant_message_id,
             text_content=text_content,
             content_parts=content_parts,
@@ -827,19 +825,11 @@ class AgentService(ResourceImplementationService):
 
     @staticmethod
     def _resolve_session_mode(run_input: RunAgentInputExt) -> str:
-        props = run_input.forwarded_props if isinstance(run_input.forwarded_props, dict) else {}
-        candidate = props.get("sessionMode")
-        if not isinstance(candidate, str) or not candidate.strip():
+        platform = run_input.platform_props
+        candidate = platform.session_mode if platform else None
+        if not candidate:
             return "auto"
-
-        normalized = candidate.strip().lower()
-        aliases = {
-            "auto": "auto",
-            "stateless": "stateless",
-            "session": "stateful",
-            "stateful": "stateful",
-        }
-        return aliases.get(normalized, normalized)
+        return candidate
 
     @classmethod
     def _requires_persistent_session_binding(
@@ -858,17 +848,11 @@ class AgentService(ResourceImplementationService):
 
     @staticmethod
     def _resolve_protocol_name(run_input: RunAgentInputExt) -> str:
-        props = run_input.forwarded_props if isinstance(run_input.forwarded_props, dict) else {}
-        candidate = props.get("protocol")
-        if not isinstance(candidate, str) or not candidate.strip():
+        platform = run_input.platform_props
+        candidate = platform.protocol if platform else None
+        if not candidate:
             return "ag-ui"
-
-        normalized = candidate.strip().lower()
-        aliases = {
-            "agui": "ag-ui",
-            "ag-ui": "ag-ui",
-        }
-        return aliases.get(normalized, normalized)
+        return candidate
 
     @staticmethod
     def _parse_positive_int(value: Any) -> Optional[int]:
@@ -968,7 +952,7 @@ class AgentService(ResourceImplementationService):
             raise
 
     @staticmethod
-    def _extract_pending_tool_call_ids(messages: List[ChatMessage]) -> Set[str]:
+    def _extract_pending_tool_call_ids(messages: List[AgentMessage]) -> Set[str]:
         if not messages:
             return set()
 
@@ -979,13 +963,13 @@ class AgentService(ResourceImplementationService):
             role = getattr(message, "role", None)
             role_value = role.value if hasattr(role, "value") else str(role or "")
 
-            if role_value == MessageRole.TOOL.value:
+            if role_value == AgentMessageRole.TOOL.value:
                 tool_call_id = getattr(message, "tool_call_id", None)
                 if isinstance(tool_call_id, str) and tool_call_id:
                     resolved_tool_call_ids.add(tool_call_id)
                 continue
 
-            if role_value != MessageRole.ASSISTANT.value:
+            if role_value != AgentMessageRole.ASSISTANT.value:
                 continue
 
             tool_calls = getattr(message, "tool_calls", None)
@@ -1045,10 +1029,10 @@ class AgentService(ResourceImplementationService):
             if not isinstance(message, LLMMessage):
                 continue
             mapped_role = {
-                "system": MessageRole.SYSTEM,
-                "user": MessageRole.USER,
-                "assistant": MessageRole.ASSISTANT,
-                "tool": MessageRole.TOOL,
+                "system": AgentMessageRole.SYSTEM,
+                "user": AgentMessageRole.USER,
+                "assistant": AgentMessageRole.ASSISTANT,
+                "tool": AgentMessageRole.TOOL,
             }.get(message.role)
             if not mapped_role:
                 continue
@@ -1058,22 +1042,22 @@ class AgentService(ResourceImplementationService):
             content_parts = message.content if isinstance(message.content, list) else None
 
             if (
-                mapped_role == MessageRole.SYSTEM
+                mapped_role == AgentMessageRole.SYSTEM
                 and isinstance(text_content, str)
                 and text_content.startswith("[CONTEXT]\n")
             ):
                 continue
 
             if (
-                mapped_role == MessageRole.SYSTEM
+                mapped_role == AgentMessageRole.SYSTEM
                 and isinstance(text_content, str)
                 and text_content.startswith("[REASONING]\n")
             ):
-                mapped_role = MessageRole.REASONING
+                mapped_role = AgentMessageRole.REASONING
                 reasoning_content = text_content[len("[REASONING]\n") :].strip()
                 text_content = reasoning_content
 
-            if mapped_role == MessageRole.TOOL and text_content is None and content_parts is not None:
+            if mapped_role == AgentMessageRole.TOOL and text_content is None and content_parts is not None:
                 text_content = json.dumps(content_parts, ensure_ascii=False)
 
             if (
@@ -1513,7 +1497,7 @@ class AgentService(ResourceImplementationService):
 
                 if session:
                     session_manager.buffer_message(
-                        role=MessageRole.USER,
+                        role=AgentMessageRole.USER,
                         message_uuid=message_ids.user_message_id if message_ids else None,
                         text_content=user_message.content if isinstance(user_message.content, str) else None,
                         content_parts=user_message.content if isinstance(user_message.content, list) else None,

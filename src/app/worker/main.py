@@ -6,6 +6,7 @@ from app.db.session import SessionLocal, engine
 from app.services.redis_service import RedisService
 from app.engine.vector.main import VectorEngineManager, VectorEngineConfig
 from app.core.config import settings
+from app.system.vectordb.manager import SystemVectorManager
 
 TASK_FUNCTIONS = []
 CRON_JOBS = []
@@ -28,6 +29,8 @@ async def startup(ctx):
     vector_manager = VectorEngineManager(configs=engine_configs)
     await vector_manager.startup()
     ctx['vector_manager'] = vector_manager
+    async with SessionLocal() as db_session:
+        await SystemVectorManager(db_session, vector_manager).initialize_system_collections()
     redis_settings = get_redis_settings()
     ctx['arq_pool'] = await create_pool(redis_settings)
     print("ARQ Worker started up, database session factory is ready.")

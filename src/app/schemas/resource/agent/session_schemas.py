@@ -1,18 +1,17 @@
-# src/app/schemas/interaction/chat_schemas.py
+# src/app/schemas/resource/agent/session_schemas.py
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from app.models.interaction.chat import MessageRole
-from app.models.interaction.chat import ChatMessage, ChatSession
+from app.models.resource.agent.session import AgentMessageRole, AgentMessage, AgentSession
 
 # --- Session Schemas ---
 
-class ChatSessionCreate(BaseModel):
+class AgentSessionCreate(BaseModel):
     agent_instance_uuid: str = Field(..., description="要交互的 Agent 实例 UUID")
     title: Optional[str] = Field(None, description="可选的会话标题")
 
-class ChatSessionRead(BaseModel):
+class AgentSessionRead(BaseModel):
     uuid: str
     title: Optional[str]
     agent_instance_uuid: str
@@ -25,7 +24,7 @@ class ChatSessionRead(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def pre_process_orm_obj(cls, data: Any) -> Any:
-        if not isinstance(data, ChatSession):
+        if not isinstance(data, AgentSession):
             return data
 
         agent_instance = getattr(data, "agent_instance", None)
@@ -40,14 +39,14 @@ class ChatSessionRead(BaseModel):
             "created_at": data.created_at,
         }
 
-class ChatSessionUpdate(BaseModel):
+class AgentSessionUpdate(BaseModel):
     title: Optional[str] = None
 
 # --- Message Schemas ---
 
-class ChatMessageRead(BaseModel):
+class AgentMessageRead(BaseModel):
     uuid: str
-    role: MessageRole
+    role: AgentMessageRole
     content: Optional[str]
     text_content: Optional[str] = None
     content_parts: Optional[List[Dict[str, Any]]] = None
@@ -67,7 +66,7 @@ class ChatMessageRead(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def pre_process_message(cls, data: Any) -> Any:
-        if not isinstance(data, ChatMessage):
+        if not isinstance(data, AgentMessage):
             return data
 
         return {
@@ -88,6 +87,6 @@ class ChatMessageRead(BaseModel):
             "created_at": data.created_at,
         }
 
-class ContextClearRequest(BaseModel):
+class AgentSessionClearContextRequest(BaseModel):
     """清空上下文的请求参数"""
     mode: str = Field("production", description="模式: 'production' (软删) 或 'debug' (物理删)")

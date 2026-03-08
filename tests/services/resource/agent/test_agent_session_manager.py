@@ -3,7 +3,7 @@ import uuid
 import pytest
 
 from app.dao.resource.resource_dao import ResourceInstanceDao
-from app.models.interaction.chat import MessageRole
+from app.models.resource.agent import AgentMessageRole
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 from app.services.resource.agent.agent_session_manager import AgentSessionManager
 
@@ -36,11 +36,11 @@ async def test_agent_session_manager_defers_deep_memory_jobs_until_post_commit_d
     await session_manager.initialize()
 
     session_manager.buffer_message(
-        role=MessageRole.USER,
+        role=AgentMessageRole.USER,
         text_content="hello",
     )
     session_manager.buffer_message(
-        role=MessageRole.ASSISTANT,
+        role=AgentMessageRole.ASSISTANT,
         text_content="world",
     )
 

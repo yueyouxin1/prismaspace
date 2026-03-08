@@ -3,8 +3,8 @@ import uuid
 import pytest
 
 from app.dao.resource.resource_dao import ResourceInstanceDao
-from app.models.interaction.chat import MessageRole
-from app.services.resource.agent.session_service import SessionService
+from app.models.resource.agent import AgentMessageRole
+from app.services.resource.agent.session_service import AgentSessionService
 
 
 @pytest.mark.asyncio
@@ -19,7 +19,7 @@ async def test_batch_append_messages_and_delete_message_track_turn_count(
     assert agent_instance is not None
 
     context = await app_context_factory(actor=registered_user_with_pro.user)
-    service = SessionService(context)
+    service = AgentSessionService(context)
     session = await service.get_or_create_session(
         session_uuid=str(uuid.uuid4()),
         agent_instance=agent_instance,
@@ -31,14 +31,14 @@ async def test_batch_append_messages_and_delete_message_track_turn_count(
         messages_data=[
             {
                 "message_uuid": "msg-turn-1-user",
-                "role": MessageRole.USER,
+                "role": AgentMessageRole.USER,
                 "text_content": "hello",
                 "run_id": "run-turn-1",
                 "turn_id": "turn-1",
             },
             {
                 "message_uuid": "msg-turn-1-assistant",
-                "role": MessageRole.ASSISTANT,
+                "role": AgentMessageRole.ASSISTANT,
                 "text_content": "world",
                 "run_id": "run-turn-1",
                 "turn_id": "turn-1",
@@ -55,7 +55,7 @@ async def test_batch_append_messages_and_delete_message_track_turn_count(
         messages_data=[
             {
                 "message_uuid": "msg-turn-2-user",
-                "role": MessageRole.USER,
+                "role": AgentMessageRole.USER,
                 "text_content": "next",
                 "run_id": "run-turn-2",
                 "turn_id": "turn-2",

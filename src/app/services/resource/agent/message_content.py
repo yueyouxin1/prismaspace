@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from app.models.interaction.chat import ChatMessage
+from app.models.resource.agent.session import AgentMessage
 
 
 def extract_text_from_content_parts(content_parts: Optional[List[Dict[str, Any]]]) -> str:
@@ -28,7 +28,7 @@ def normalize_text_content(
     return extract_text_from_content_parts(content_parts)
 
 
-def chat_message_to_text(message: ChatMessage) -> str:
+def agent_message_to_text(message: AgentMessage) -> str:
     return normalize_text_content(
         text_content=getattr(message, "text_content", None),
         content_parts=getattr(message, "content_parts", None),
@@ -42,4 +42,3 @@ def llm_content_to_text(content: Any) -> str:
     if isinstance(content, list):
         return extract_text_from_content_parts(content)
     return ""
-

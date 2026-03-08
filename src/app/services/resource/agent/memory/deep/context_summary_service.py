@@ -8,7 +8,8 @@ from sqlalchemy import func
 from app.core.context import AppContext
 from app.services.base_service import BaseService
 from app.services.common.llm_capability_provider import AICapabilityProvider, UsageAccumulator, LLMBillingCallbacks
-from app.models import ChatMessage, MessageRole, AgentContextSummary
+from app.models import AgentContextSummary
+from app.models.resource.agent import AgentMessage, AgentMessageRole
 from app.dao.workspace.workspace_dao import WorkspaceDao
 from app.dao.resource.agent.agent_memory_dao import AgentContextSummaryDao
 from app.dao.resource.resource_dao import ResourceInstanceDao
@@ -16,7 +17,7 @@ from app.models.resource.agent.agent_memory import SummaryScope
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 from app.schemas.resource.agent.agent_memory_schemas import AgentContextSummaryRead
 from app.services.module.service_module_service import ServiceModuleService
-from app.services.resource.agent.message_content import chat_message_to_text
+from app.services.resource.agent.message_content import agent_message_to_text
 from app.engine.model.llm import (
     LLMRunConfig, 
     LLMMessage, 
@@ -101,7 +102,7 @@ class ContextSummaryService(BaseService):
         mode: str = "production",
     ):
         """
-        [联动接口] 当 SessionService 删除消息时调用。
+        [联动接口] 当 AgentSessionService 删除消息时调用。
         作废该业务轮次对应的所有摘要。
         """
         if not turn_id:
@@ -145,17 +146,17 @@ class ContextSummaryService(BaseService):
 
     # --- LLM Summarization Logic ---
 
-    def _build_turn_transcript(self, messages: List[ChatMessage]) -> str:
+    def _build_turn_transcript(self, messages: List[AgentMessage]) -> str:
         """
         将对话轮次转换为适合做摘要的 Transcript 格式。
         """
         buffer = []
         for msg in messages:
             role = msg.role.value.capitalize()
-            content = chat_message_to_text(msg)
+            content = agent_message_to_text(msg)
             
             # 简化 Tool Output，避免过多干扰摘要
-            if msg.role == MessageRole.TOOL:
+            if msg.role == AgentMessageRole.TOOL:
                 content = f"[Tool Result] (Length: {len(content)})"
             
             buffer.append(f"{role}: {content}")
@@ -168,7 +169,7 @@ class ContextSummaryService(BaseService):
         session_uuid: str,
         run_id: str,
         turn_id: str,
-        messages: List[ChatMessage],
+        messages: List[AgentMessage],
         deep_memory_config: DeepMemoryConfig,
         # 显式传入运行时工作空间ID，用于计费归属
         runtime_workspace_id: int,
@@ -279,3 +280,4 @@ class ContextSummaryService(BaseService):
 
         except Exception as e:
             logger.error("Context summary task failed for turn %s: %s", turn_id, e, exc_info=True)
+            raise

@@ -548,7 +548,7 @@ class AppAgentNode(BaseNode, BaseLLMNodeProcessor):
 
         forwarded_props: Dict[str, Any] = {}
         if enable_session is False or (enable_session is not True and not session_uuid):
-            forwarded_props["sessionMode"] = "stateless"
+            forwarded_props["platform"] = {"sessionMode": "stateless"}
 
         run_input = RunAgentInputExt.model_validate(
             {

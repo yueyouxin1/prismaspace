@@ -1,4 +1,4 @@
-# src/app/models/interaction/chat.py
+# src/app/models/resource/agent/session.py
 
 from sqlalchemy import Column, Integer, String, Text, JSON, Enum, ForeignKey, DateTime, func, Boolean
 from sqlalchemy.orm import relationship
@@ -6,7 +6,7 @@ from app.db.base import Base
 from app.utils.id_generator import generate_uuid
 import enum
 
-class MessageRole(str, enum.Enum):
+class AgentMessageRole(str, enum.Enum):
     SYSTEM = "system"
     DEVELOPER = "developer"
     USER = "user"
@@ -15,9 +15,9 @@ class MessageRole(str, enum.Enum):
     ACTIVITY = "activity"
     REASONING = "reasoning"
 
-class ChatSession(Base):
+class AgentSession(Base):
     """
-    会话表 - 代表 Agent 与 用户的一次连续交互上下文。
+    会话表 - 代表 Agent 与用户的一次连续交互上下文。
     """
     __tablename__ = 'ai_chat_sessions'
 
@@ -46,9 +46,9 @@ class ChatSession(Base):
     # 关系
     user = relationship("User")
     agent_instance = relationship("ResourceInstance")
-    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.id")
+    messages = relationship("AgentMessage", back_populates="session", cascade="all, delete-orphan", order_by="AgentMessage.id")
 
-class ChatMessage(Base):
+class AgentMessage(Base):
     """
     消息表 - 记录每一条交互内容。
     """
@@ -60,7 +60,7 @@ class ChatMessage(Base):
     session_id = Column(Integer, ForeignKey('ai_chat_sessions.id', ondelete='CASCADE'), nullable=False, index=True)
     
     # 核心内容
-    role = Column(Enum(MessageRole), nullable=False)
+    role = Column(Enum(AgentMessageRole, name="messagerole"), nullable=False)
     content = Column(Text, nullable=True) # Tool Call 的 content 可能为空
     text_content = Column(Text, nullable=True, comment="结构化文本内容（主字段）")
     content_parts = Column(JSON, nullable=True, comment="多模态内容分片（AG-UI content parts）")
@@ -89,4 +89,4 @@ class ChatMessage(Base):
     
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
-    session = relationship("ChatSession", back_populates="messages")
+    session = relationship("AgentSession", back_populates="messages")

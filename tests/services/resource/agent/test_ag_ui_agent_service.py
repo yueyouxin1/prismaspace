@@ -5,8 +5,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.engine.model.llm import LLMMessage
-from app.models.interaction.chat import MessageRole
-from app.schemas.protocol import RunAgentInputExt
+from app.models.resource.agent import AgentMessageRole
+from app.schemas.protocol import RunAgentInputExt, RunAgentPlatformProps
 from app.services.resource.agent.ag_ui_processor import AgUiProcessor
 from app.services.resource.agent.agent_service import AgentService
 from app.services.resource.agent.ag_ui_normalizer import AgUiNormalizer
@@ -315,12 +315,15 @@ def test_is_valid_uuid():
 
 def test_resolve_protocol_name_defaults_and_aliases():
     run_default = _build_run_input()
-    run_alias = _build_run_input(forwardedProps={"protocol": "AGUI"})
-    run_unknown = _build_run_input(forwardedProps={"protocol": "mcp"})
+    run_alias = _build_run_input(forwardedProps={"platform": {"protocol": "AGUI"}})
 
     assert AgentService._resolve_protocol_name(run_default) == "ag-ui"
     assert AgentService._resolve_protocol_name(run_alias) == "ag-ui"
-    assert AgentService._resolve_protocol_name(run_unknown) == "mcp"
+
+
+def test_forwarded_props_platform_protocol_rejects_unknown_value():
+    with pytest.raises(ValidationError, match="protocol must be 'ag-ui'"):
+        _build_run_input(forwardedProps={"platform": {"protocol": "mcp"}})
 
 
 def test_interrupt_id_helpers_require_canonical_run_id():
@@ -349,28 +352,54 @@ def test_build_stream_message_ids_generates_platform_ids():
 
 def test_resolve_session_mode_defaults_and_aliases():
     run_default = _build_run_input()
-    run_stateless = _build_run_input(forwardedProps={"sessionMode": "STATELESS"})
-    run_stateful = _build_run_input(forwardedProps={"sessionMode": "session"})
+    run_stateless = _build_run_input(forwardedProps={"platform": {"sessionMode": "STATELESS"}})
+    run_stateful = _build_run_input(forwardedProps={"platform": {"sessionMode": "session"}})
 
     assert AgentService._resolve_session_mode(run_default) == "auto"
     assert AgentService._resolve_session_mode(run_stateless) == "stateless"
     assert AgentService._resolve_session_mode(run_stateful) == "stateful"
 
 
+def test_forwarded_props_platform_rejects_unknown_keys():
+    with pytest.raises(ValidationError):
+        _build_run_input(forwardedProps={"platform": {"debug": True}})
+
+
+def test_forwarded_props_outer_extensions_remain_open_and_preserved():
+    run_input = _build_run_input(
+        forwardedProps={
+            "platform": {"sessionMode": "auto"},
+            "trace": "trace-123",
+            "middleware": {"debug": True},
+        }
+    )
+
+    forwarded_props = run_input.forwarded_props.model_dump(by_alias=True, exclude_none=True)
+
+    assert forwarded_props["trace"] == "trace-123"
+    assert forwarded_props["middleware"] == {"debug": True}
+    assert forwarded_props["platform"]["sessionMode"] == "auto"
+
+
+def test_platform_agent_uuid_schema_marks_websocket_only_usage():
+    schema = RunAgentPlatformProps.model_json_schema(by_alias=True)
+    agent_uuid = schema["properties"]["agentUuid"]
+
+    assert "WebSocket-only" in agent_uuid["description"]
+
+
 def test_requires_persistent_session_binding_only_for_session_intent():
     run_auto = _build_run_input()
     run_with_uuid_thread = _build_run_input(threadId="123e4567-e89b-12d3-a456-426614174000")
-    run_with_legacy_session_prop = _build_run_input(
-        forwardedProps={"sessionUuid": "123e4567-e89b-12d3-a456-426614174000"}
-    )
+    run_with_extra_forwarded_prop = _build_run_input(forwardedProps={"trace": "123"})
     run_stateless = _build_run_input(
         threadId="123e4567-e89b-12d3-a456-426614174000",
-        forwardedProps={"sessionMode": "stateless"},
+        forwardedProps={"platform": {"sessionMode": "stateless"}},
     )
 
     assert AgentService._requires_persistent_session_binding(run_auto) is False
     assert AgentService._requires_persistent_session_binding(run_with_uuid_thread) is True
-    assert AgentService._requires_persistent_session_binding(run_with_legacy_session_prop) is False
+    assert AgentService._requires_persistent_session_binding(run_with_extra_forwarded_prop) is False
     assert AgentService._requires_persistent_session_binding(run_stateless) is False
 
 
@@ -384,17 +413,17 @@ def test_resolve_model_context_window_with_fallback_keys():
 def test_extract_pending_tool_call_ids():
     messages = [
         SimpleNamespace(
-            role=MessageRole.ASSISTANT,
+            role=AgentMessageRole.ASSISTANT,
             tool_calls=[{"id": "call-1"}, {"id": "call-2"}],
             tool_call_id=None,
         ),
         SimpleNamespace(
-            role=MessageRole.TOOL,
+            role=AgentMessageRole.TOOL,
             tool_calls=None,
             tool_call_id="call-1",
         ),
         SimpleNamespace(
-            role=MessageRole.ASSISTANT,
+            role=AgentMessageRole.ASSISTANT,
             tool_calls=[{"id": "call-3"}],
             tool_call_id=None,
         ),
@@ -420,9 +449,9 @@ def test_buffer_protocol_history_messages_persists_reasoning_and_tool_result():
     service._buffer_protocol_history_messages(session_manager, history)
 
     assert len(calls) == 2
-    assert calls[0]["role"] == MessageRole.REASONING
+    assert calls[0]["role"] == AgentMessageRole.REASONING
     assert calls[0]["reasoning_content"] == "chain"
-    assert calls[1]["role"] == MessageRole.TOOL
+    assert calls[1]["role"] == AgentMessageRole.TOOL
     assert calls[1]["tool_call_id"] == "call-1"
 
 
@@ -430,7 +459,7 @@ def test_buffer_protocol_history_messages_persists_reasoning_and_tool_result():
 async def test_enforce_pending_tool_results_requires_resume_matches():
     service = object.__new__(AgentService)
     assistant_with_tool = SimpleNamespace(
-        role=MessageRole.ASSISTANT,
+        role=AgentMessageRole.ASSISTANT,
         tool_calls=[{"id": "call-1"}],
         tool_call_id=None,
     )

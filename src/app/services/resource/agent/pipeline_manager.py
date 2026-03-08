@@ -99,11 +99,12 @@ class AgentPipelineManager:
             dependencies
         ))
 
-        # 2.2 Deep Memory Tools (expand_long_term_context)
-        if agent_config.deep_memory.enabled:
+        # 2.2 Deep Memory Tools (L2 summary context expansion)
+        if agent_config.deep_memory.enabled and session_manager:
             self._skill_processors.append(DeepMemorySkillsProcessor(
                 app_context, 
-                agent_config.deep_memory
+                agent_config.deep_memory,
+                session_manager,
             ))
 
         # 2.3 Memory Variable Tools (memory_get, memory_set)

@@ -4,9 +4,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from app.core.context import AppContext
 from app.models import User, Workspace
-from app.models.resource.agent import Agent
-from app.models.interaction.chat import ChatMessage, ChatSession, MessageRole
-from app.services.resource.agent.session_service import SessionService
+from app.models.resource.agent import Agent, AgentMessage, AgentSession, AgentMessageRole
+from app.services.resource.agent.session_service import AgentSessionService
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 from app.services.exceptions import ServiceException, NotFoundError
 
@@ -44,16 +43,16 @@ class AgentSessionManager:
         self.create_if_missing = create_if_missing
         
         # 依赖服务
-        self.session_service = SessionService(context)
+        self.session_service = AgentSessionService(context)
         
         # 内部状态
-        self.session: Optional[ChatSession] = None
+        self.session: Optional[AgentSession] = None
         self.run_id: str = run_id
         self.turn_id: str = turn_id
         self.trace_id: str = trace_id
         self.message_buffer: List[Dict[str, Any]] = [] # 待提交的消息缓冲区
         # 单次请求内的最近 turn 快照缓存，避免首 token 前重复查库。
-        self._recent_turn_messages_cache: List[ChatMessage] = []
+        self._recent_turn_messages_cache: List[AgentMessage] = []
         self._recent_turn_messages_cache_turns: int = 0
         self._post_commit_jobs: List[Dict[str, Any]] = []
 
@@ -75,7 +74,7 @@ class AgentSessionManager:
                 raise ServiceException("Agent Session Initialize Error.")
 
     @staticmethod
-    def _slice_recent_turn_messages(messages: List[ChatMessage], turns: int) -> List[ChatMessage]:
+    def _slice_recent_turn_messages(messages: List[AgentMessage], turns: int) -> List[AgentMessage]:
         if turns <= 0 or not messages:
             return []
 
@@ -100,7 +99,7 @@ class AgentSessionManager:
             if getattr(message, "turn_id", None) in selected_turn_id_set
         ]
 
-    async def get_recent_messages(self, turns: int) -> List[ChatMessage]:
+    async def get_recent_messages(self, turns: int) -> List[AgentMessage]:
         if not self.session or turns <= 0:
             return []
 
@@ -117,7 +116,7 @@ class AgentSessionManager:
 
     def buffer_message(
         self, 
-        role: MessageRole, 
+        role: AgentMessageRole, 
         message_uuid: Optional[str] = None,
         text_content: Optional[str] = None,
         content_parts: Optional[List[Dict[str, Any]]] = None,
@@ -200,7 +199,7 @@ class AgentSessionManager:
             return
 
         try:
-            # 1. 批量写入 DB (SessionService)
+            # 1. 批量写入 DB (AgentSessionService)
             await self.session_service.batch_append_messages(
                 session=self.session,
                 messages_data=self.message_buffer
@@ -212,7 +211,7 @@ class AgentSessionManager:
             self._recent_turn_messages_cache_turns = 0
             # 2. 检查是否有价值内容 (User/Assistant)
             has_valuable_content = any(
-                m['role'] in [MessageRole.USER, MessageRole.ASSISTANT] 
+                m['role'] in [AgentMessageRole.USER, AgentMessageRole.ASSISTANT] 
                 for m in messages_committed
             )
             

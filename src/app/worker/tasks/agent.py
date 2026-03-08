@@ -5,7 +5,7 @@ from app.worker.context import rebuild_context_for_worker
 from app.services.resource.agent.memory.deep.long_term_context_service import LongTermContextService
 from app.services.resource.agent.memory.deep.context_summary_service import ContextSummaryService
 from app.dao.resource.agent.agent_dao import AgentDao
-from app.models.interaction.chat import ChatMessage, ChatSession
+from app.models.resource.agent import AgentMessage, AgentSession
 from app.schemas.resource.agent.agent_schemas import AgentConfig
 
 logger = logging.getLogger(__name__)
@@ -31,15 +31,15 @@ async def index_turn_task(
                 
                 # 1. 获取该业务轮次下的所有消息
                 stmt = (
-                    select(ChatMessage)
-                    .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+                    select(AgentMessage)
+                    .join(AgentSession, AgentSession.id == AgentMessage.session_id)
                     .where(
-                        ChatMessage.turn_id == turn_id,
-                        ChatMessage.is_deleted == False,
-                        ChatSession.uuid == session_uuid,
-                        ChatSession.agent_instance_id == agent_instance_id,
+                        AgentMessage.turn_id == turn_id,
+                        AgentMessage.is_deleted == False,
+                        AgentSession.uuid == session_uuid,
+                        AgentSession.agent_instance_id == agent_instance_id,
                     )
-                    .order_by(ChatMessage.id.asc())
+                    .order_by(AgentMessage.id.asc())
                 )
                 result = await session.execute(stmt)
                 messages = result.scalars().all()
@@ -83,15 +83,15 @@ async def summarize_turn_task(
                 
                 # 1. 获取消息
                 stmt = (
-                    select(ChatMessage)
-                    .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+                    select(AgentMessage)
+                    .join(AgentSession, AgentSession.id == AgentMessage.session_id)
                     .where(
-                        ChatMessage.turn_id == turn_id,
-                        ChatMessage.is_deleted == False,
-                        ChatSession.uuid == session_uuid,
-                        ChatSession.agent_instance_id == agent_instance_id,
+                        AgentMessage.turn_id == turn_id,
+                        AgentMessage.is_deleted == False,
+                        AgentSession.uuid == session_uuid,
+                        AgentSession.agent_instance_id == agent_instance_id,
                     )
-                    .order_by(ChatMessage.id.asc())
+                    .order_by(AgentMessage.id.asc())
                 )
                 result = await session.execute(stmt)
                 messages = result.scalars().all()

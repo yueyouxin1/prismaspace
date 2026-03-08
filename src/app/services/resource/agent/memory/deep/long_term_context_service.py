@@ -4,25 +4,22 @@ import logging
 import json
 from typing import List, Dict, Any, Optional
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import AppContext
 from app.services.base_service import BaseService
-from app.models import User, Team, Workspace, ChatMessage, ChatSession, MessageRole
-from app.models.resource.agent import Agent
+from app.models import Workspace
+from app.models.resource.agent import AgentMessage, AgentMessageRole, AgentSession
 from app.dao.workspace.workspace_dao import WorkspaceDao
-from app.dao.interaction.chat_dao import ChatMessageDao
 from app.dao.resource.resource_dao import ResourceInstanceDao
 from app.dao.module.service_module_dao import ServiceModuleVersionDao
 from app.services.module.embedding_service import EmbeddingService
-from app.services.resource.agent.message_content import chat_message_to_text
+from app.services.resource.agent.message_content import agent_message_to_text
 from app.system.vectordb.constants import AGENT_LONG_TERM_CONTEXT_COLLECTION
-from app.services.exceptions import ConfigurationError, ServiceException, NotFoundError
 from app.schemas.resource.agent.agent_schemas import DeepMemoryConfig
 
 # 引入 Parsing 引擎相关
 from app.engine.vector.base import VectorChunk
-from app.engine.parsing.base import Document, ChunkerPolicy
+from app.engine.parsing.base import Document
 from app.engine.parsing.chunkers.context_chunker import ContextChunker
 
 logger = logging.getLogger(__name__)
@@ -47,7 +44,6 @@ class LongTermContextService(BaseService):
     def __init__(self, context: AppContext):
         self.db = context.db
         self.workspace_dao = WorkspaceDao(context.db)
-        self.message_dao = ChatMessageDao(context.db)
         self.instance_dao = ResourceInstanceDao(context.db)
         self.smv_dao = ServiceModuleVersionDao(context.db)
         self.embedding_service = EmbeddingService(context)
@@ -56,7 +52,7 @@ class LongTermContextService(BaseService):
         # 实例化 Chunker (它无状态且轻量)
         self.chunker = ContextChunker()
 
-    def _build_turn_text(self, messages: List[ChatMessage]) -> str:
+    def _build_turn_text(self, messages: List[AgentMessage]) -> str:
         """
         [Content Assembly] 将一个完整的对话轮次拼装成一个长文本。
         我们保留所有内容，具体的 Token 限制交由 Chunker 处理。
@@ -64,10 +60,10 @@ class LongTermContextService(BaseService):
         buffer = []
         for msg in messages:
             role_tag = msg.role.value.upper()
-            content = chat_message_to_text(msg)
+            content = agent_message_to_text(msg)
             
             # 特殊处理 Tool Calls 的显示，增加语义可读性
-            if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+            if msg.role == AgentMessageRole.ASSISTANT and msg.tool_calls:
                 try:
                     calls = msg.tool_calls if isinstance(msg.tool_calls, list) else json.loads(msg.tool_calls)
                     func_names = [c.get('function', {}).get('name', 'unknown') for c in calls]
@@ -105,7 +101,7 @@ class LongTermContextService(BaseService):
         session_uuid: str,
         run_id: str,
         turn_id: str,
-        messages: List[ChatMessage],
+        messages: List[AgentMessage],
         # 显式传入运行时工作空间ID，用于计费归属
         runtime_workspace_id: int,
         trace_id: Optional[str] = None,
@@ -161,9 +157,6 @@ class LongTermContextService(BaseService):
             return
 
         try:
-            # 4. 确保集合存在
-            dims = default_emb_module.attributes.get("dimensions")
-
             # 5. 生成向量 (Batch Embedding + Billing)
             texts_to_embed = [c.content for c in chunks]
             
@@ -222,6 +215,7 @@ class LongTermContextService(BaseService):
 
         except Exception as e:
             logger.error("Failed to index long-term context for turn %s: %s", turn_id, e, exc_info=True)
+            raise
 
     async def retrieve(
         self, 
@@ -231,7 +225,7 @@ class LongTermContextService(BaseService):
         exclude_turn_ids: List[str], 
         deep_memory_config: DeepMemoryConfig,
         runtime_workspace: Workspace
-    ) -> List[List[ChatMessage]]:
+    ) -> List[List[AgentMessage]]:
         """
         [Runtime Retrieval] 检索长期记忆。
         
@@ -243,7 +237,7 @@ class LongTermContextService(BaseService):
         5. DB 反查完整轮次。
         
         Returns:
-            List[List[ChatMessage]]: 返回一个列表，每个元素是一个完整轮次的消息列表。
+            List[List[AgentMessage]]: 返回一个列表，每个元素是一个完整轮次的消息列表。
         """
 
         if not runtime_workspace:
@@ -279,7 +273,7 @@ class LongTermContextService(BaseService):
             # 2. 向量搜索
             engine = await self.vector_manager.get_engine("default")
             
-            # Filter: 必须匹配 Agent, User 和 Session
+            # Filter: 必须匹配 Agent 和 Session
             filter_expr = (
                 f'payload["agent_instance_id"] == {agent_instance_id} '
                 f'&& payload["session_uuid"] == "{self._escape_filter_value(session_uuid)}"'
@@ -323,21 +317,21 @@ class LongTermContextService(BaseService):
 
             # 4. 数据库反查 (Hydration)
             stmt = (
-                select(ChatMessage)
-                .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+                select(AgentMessage)
+                .join(AgentSession, AgentSession.id == AgentMessage.session_id)
                 .where(
-                    ChatMessage.turn_id.in_(valid_turn_ids),
-                    ChatMessage.is_deleted == False,
-                    ChatSession.uuid == session_uuid,
-                    ChatSession.agent_instance_id == agent_instance_id,
+                    AgentMessage.turn_id.in_(valid_turn_ids),
+                    AgentMessage.is_deleted == False,
+                    AgentSession.uuid == session_uuid,
+                    AgentSession.agent_instance_id == agent_instance_id,
                 )
-                .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+                .order_by(AgentMessage.created_at.asc(), AgentMessage.id.asc())
             )
             result = await self.db.execute(stmt)
             all_messages = result.scalars().all()
             
             # 按 turn ID 分组
-            messages_by_turn: Dict[str, List[ChatMessage]] = {tid: [] for tid in valid_turn_ids}
+            messages_by_turn: Dict[str, List[AgentMessage]] = {tid: [] for tid in valid_turn_ids}
             for msg in all_messages:
                 if msg.turn_id in messages_by_turn:
                     messages_by_turn[msg.turn_id].append(msg)
@@ -360,27 +354,3 @@ class LongTermContextService(BaseService):
             logger.error(f"LongTermContext retrieval failed: {e}", exc_info=True)
             return []
 
-    async def retrieve_by_turn_id_direct(
-        self,
-        turn_id: str,
-        *,
-        session_uuid: str,
-        agent_instance_id: int,
-    ) -> List[ChatMessage]:
-        """
-        [Tool Support] 根据 turn ID 精确找回某一轮对话的完整内容。
-        用于 'expand_long_term_context' 工具。
-        """
-        stmt = (
-            select(ChatMessage)
-            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
-            .where(
-                ChatMessage.turn_id == turn_id,
-                ChatMessage.is_deleted == False,
-                ChatSession.uuid == session_uuid,
-                ChatSession.agent_instance_id == agent_instance_id,
-            )
-            .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
-        )
-        result = await self.db.execute(stmt)
-        return result.scalars().all()

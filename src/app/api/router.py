@@ -21,8 +21,7 @@ from app.api.v1 import role
 from app.api.v1 import permission
 from app.api.v1 import feature
 from app.api.v1 import product
-from app.api.v1 import chat
-from app.api.v1.agent import agent_api, agent_memory
+from app.api.v1.agent import agent_api, agent_memory, session_api
 from app.api.v1.workflow import workflow_api
 
 # The main router for API v1
@@ -139,10 +138,9 @@ router.include_router(uiapp.router, prefix="/uiapps", tags=["Resources - UiApp"]
 router.include_router(tenantdb.router, prefix="/tenantdb", tags=["Resource - TenantDB"])
 router.include_router(knowledge.router, prefix="/knowledge", tags=["Resource - KnowledgeBase"])
 router.include_router(agent_api.router, prefix="/agent", tags=["Resource - Agent"])
+router.include_router(session_api.router, prefix="/agent", tags=["Resource - Agent - Session"])
 router.include_router(agent_memory.router, prefix="/agent/memory", tags=["Resource - Agent - Memory"])
 router.include_router(workflow_api.router, prefix="/workflow", tags=["Resource - Workflow"])
 
 # The universal execution endpoint
 router.include_router(execution.router, prefix="/execute", tags=["Execution"])
-
-router.include_router(chat.router, prefix="/chat", tags=["Interaction - Chat"])
