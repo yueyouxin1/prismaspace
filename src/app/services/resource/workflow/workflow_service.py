@@ -1189,7 +1189,7 @@ class WorkflowService(ResourceImplementationService):
             error_message=execution.error_message,
             started_at=execution.started_at,
             finished_at=execution.finished_at,
-            latest_checkpoint=WorkflowCheckpointRead.model_validate(latest_checkpoint) if latest_checkpoint else None,
+            latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
         )
 
     async def get_run(self, run_id: str) -> WorkflowRunRead:
@@ -1231,7 +1231,7 @@ class WorkflowService(ResourceImplementationService):
             finished_at=execution.finished_at,
             workflow_instance_uuid=workflow_instance.uuid,
             workflow_name=workflow_instance.name,
-            latest_checkpoint=WorkflowCheckpointRead.model_validate(latest_checkpoint) if latest_checkpoint else None,
+            latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
             node_executions=[WorkflowRunNodeRead.model_validate(item) for item in node_executions],
             can_resume=can_resume,
         )
@@ -1294,7 +1294,7 @@ class WorkflowService(ResourceImplementationService):
                     error_message=execution.error_message,
                     started_at=execution.started_at,
                     finished_at=execution.finished_at,
-                    latest_checkpoint=WorkflowCheckpointRead.model_validate(latest_checkpoint) if latest_checkpoint else None,
+                    latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
                 )
             )
         return summaries

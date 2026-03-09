@@ -7,7 +7,7 @@ from typing import Optional
 from app.core.trace_manager import TraceManager
 from app.models import ResourceExecution, ResourceExecutionStatus, User, Workspace
 from app.schemas.protocol import RunAgentInputExt
-from app.services.exceptions import ConfigurationError, NotFoundError, PermissionDeniedError, ServiceException
+from app.services.exceptions import ActiveRunExistsError, ConfigurationError, NotFoundError, PermissionDeniedError, ServiceException
 from app.services.resource.agent.agent_session_manager import AgentSessionManager
 from app.services.resource.agent.processors import ResourceAwareToolExecutor
 from app.services.resource.agent.types.agent import AgentRunResult, PreparedAgentRun
@@ -80,53 +80,64 @@ class AgentRunPreparationService:
         parent_execution = None
         parent_checkpoint = None
         turn_id: Optional[str] = None
-        if parent_run_id:
-            parent_execution = await service.execution_ledger_service.resolve_parent_execution(
-                parent_run_id=parent_run_id,
+        execution: Optional[ResourceExecution] = None
+        try:
+            active_execution = await service.execution_ledger_service.get_latest_active_execution(
                 instance=instance,
                 actor=actor,
                 thread_id=requested_thread_id,
             )
-            if parent_execution is None:
-                parent_run_id = None
-            else:
-                turn_id = await service.execution_ledger_service.resolve_lineage_root_run_id(
-                    execution=parent_execution,
+            if active_execution is not None:
+                raise ActiveRunExistsError(
+                    "An active agent run already exists for this thread. "
+                    "Query /active-run and attach /live instead of starting a new run."
+                )
+
+            if parent_run_id:
+                parent_execution = await service.execution_ledger_service.resolve_parent_execution(
+                    parent_run_id=parent_run_id,
                     instance=instance,
                     actor=actor,
                     thread_id=requested_thread_id,
                 )
-                if not turn_id:
-                    parent_execution = None
+                if parent_execution is None:
                     parent_run_id = None
                 else:
-                    parent_checkpoint = await service.run_persistence_service.get_checkpoint(
-                        execution_id=parent_execution.id
+                    turn_id = await service.execution_ledger_service.resolve_lineage_root_run_id(
+                        execution=parent_execution,
+                        instance=instance,
+                        actor=actor,
+                        thread_id=requested_thread_id,
                     )
+                    if not turn_id:
+                        parent_execution = None
+                        parent_run_id = None
+                    else:
+                        parent_checkpoint = await service.run_persistence_service.get_checkpoint(
+                            execution_id=parent_execution.id
+                        )
 
-        if resume_interrupt_id:
-            if parent_execution is None:
-                raise ServiceException("resume interruptId is invalid for the current session/thread.")
-            if parent_execution.status != ResourceExecutionStatus.INTERRUPTED:
-                raise ServiceException("resume interruptId must reference an interrupted run.")
-            if resume_interrupt_id != parent_execution.run_id:
-                raise ServiceException("resume interruptId does not match the parent run.")
-            if parent_checkpoint and parent_checkpoint.pending_client_tool_calls:
-                expected_tool_call_ids = {
-                    str(item.get("tool_call_id") or item.get("toolCallId"))
-                    for item in parent_checkpoint.pending_client_tool_calls
-                    if isinstance(item, dict)
-                }
-                provided_tool_call_ids = {item for item in adapted.resume_tool_call_ids if isinstance(item, str)}
-                missing_tool_call_ids = expected_tool_call_ids - provided_tool_call_ids
-                if missing_tool_call_ids:
-                    raise ServiceException(
-                        "resume interruptId is missing tool results for: " + ", ".join(sorted(missing_tool_call_ids))
-                    )
-            adapted = service._restore_adapted_from_checkpoint(adapted, parent_checkpoint)
+            if resume_interrupt_id:
+                if parent_execution is None:
+                    raise ServiceException("resume interruptId is invalid for the current session/thread.")
+                if parent_execution.status != ResourceExecutionStatus.INTERRUPTED:
+                    raise ServiceException("resume interruptId must reference an interrupted run.")
+                if resume_interrupt_id != parent_execution.run_id:
+                    raise ServiceException("resume interruptId does not match the parent run.")
+                if parent_checkpoint and parent_checkpoint.pending_client_tool_calls:
+                    expected_tool_call_ids = {
+                        str(item.get("tool_call_id") or item.get("toolCallId"))
+                        for item in parent_checkpoint.pending_client_tool_calls
+                        if isinstance(item, dict)
+                    }
+                    provided_tool_call_ids = {item for item in adapted.resume_tool_call_ids if isinstance(item, str)}
+                    missing_tool_call_ids = expected_tool_call_ids - provided_tool_call_ids
+                    if missing_tool_call_ids:
+                        raise ServiceException(
+                            "resume interruptId is missing tool results for: " + ", ".join(sorted(missing_tool_call_ids))
+                        )
+                adapted = service._restore_adapted_from_checkpoint(adapted, parent_checkpoint)
 
-        execution: Optional[ResourceExecution] = None
-        try:
             execution = await service.execution_ledger_service.create_execution(
                 instance=instance,
                 actor=actor,

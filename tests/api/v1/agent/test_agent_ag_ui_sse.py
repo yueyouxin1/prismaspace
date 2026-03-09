@@ -7,7 +7,7 @@ import pytest
 
 from app.api.v1.agent import agent_api
 from app.schemas.protocol import RunAgentInputExt
-from app.services.exceptions import ServiceException
+from app.services.exceptions import ActiveRunExistsError, ServiceException
 
 
 def _build_run_input():
@@ -36,9 +36,6 @@ async def test_stream_agent_route_outputs_ag_ui_sse(monkeypatch):
     class _FakeAgentService:
         def __init__(self, context):
             self.context = context
-
-        async def get_active_run(self, instance_uuid, actor, thread_id):
-            return None
 
         async def async_execute(self, instance_uuid, request, actor):
             async def _gen():
@@ -102,9 +99,6 @@ async def test_stream_agent_route_wraps_service_exception_to_run_error(monkeypat
         def __init__(self, context):
             self.context = context
 
-        async def get_active_run(self, instance_uuid, actor, thread_id):
-            return None
-
         async def async_execute(self, instance_uuid, request, actor):
             raise ServiceException("boom")
 
@@ -134,9 +128,6 @@ async def test_stream_agent_disconnect_does_not_cancel_background_run(monkeypatc
         def __init__(self, context):
             self.context = context
 
-        async def get_active_run(self, instance_uuid, actor, thread_id):
-            return None
-
         async def async_execute(self, instance_uuid, request, actor):
             async def _gen():
                 yield {"type": "RUN_STARTED", "threadId": "thread-x", "runId": "run-x"}
@@ -164,24 +155,15 @@ async def test_stream_agent_disconnect_does_not_cancel_background_run(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_auto_attaches_active_run_and_replays_live_events(monkeypatch):
+async def test_stream_agent_surfaces_active_run_conflict_without_auto_attach(monkeypatch):
     class _FakeAgentService:
         def __init__(self, context):
             self.context = context
 
-        async def get_active_run(self, instance_uuid, actor, thread_id):
-            return {"run_id": "run-live-1", "thread_id": thread_id, "status": "running"}
-
-        async def stream_live_run_events(self, run_id, after_seq=0):
-            for payload in (
-                {"type": "RUN_STARTED", "threadId": "thread-x", "runId": run_id},
-                {"type": "TEXT_MESSAGE_CONTENT", "messageId": "assistant-run-x", "delta": "hello"},
-                {"type": "RUN_FINISHED", "threadId": "thread-x", "runId": run_id, "outcome": "success"},
-            ):
-                yield {"seq": after_seq + 1, "payload": payload}
-
         async def async_execute(self, instance_uuid, request, actor):
-            raise AssertionError("async_execute should not be called when an active run exists")
+            raise ActiveRunExistsError(
+                "An active agent run already exists for this thread. Query /active-run and attach /live instead of starting a new run."
+            )
 
     monkeypatch.setattr(agent_api, "AgentService", _FakeAgentService)
 
@@ -195,8 +177,5 @@ async def test_stream_agent_auto_attaches_active_run_and_replays_live_events(mon
         for line in body.splitlines()
         if line.startswith("data: ")
     ]
-    assert [payload["type"] for payload in payloads] == [
-        "RUN_STARTED",
-        "TEXT_MESSAGE_CONTENT",
-        "RUN_FINISHED",
-    ]
+    assert payloads[-1]["type"] == "RUN_ERROR"
+    assert payloads[-1]["code"] == "AGENT_ACTIVE_RUN_EXISTS"

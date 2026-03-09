@@ -728,29 +728,9 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         return list(self._tool_history.values())
 
     async def on_checkpoint_snapshot(self, snapshot: AgentRuntimeCheckpoint) -> None:
-        self._runtime_checkpoint_snapshot = {
-            "phase": snapshot.phase,
-            "messages": [
-                message.model_dump(mode="json", by_alias=True, exclude_none=True)
-                if hasattr(message, "model_dump")
-                else message
-                for message in snapshot.messages
-            ],
-            "tools": [
-                tool.model_dump(mode="json", by_alias=True, exclude_none=True)
-                if hasattr(tool, "model_dump")
-                else tool
-                for tool in snapshot.tools
-            ],
-            "pending_client_tool_calls": [
-                {
-                    "tool_call_id": item.tool_call_id,
-                    "name": item.name,
-                    "arguments": self._normalize_json(item.arguments),
-                }
-                for item in snapshot.pending_client_tool_calls
-            ],
-        }
+        self._runtime_checkpoint_snapshot = self._normalize_json(
+            snapshot.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
 
     def get_runtime_checkpoint_snapshot(self) -> Dict[str, Any]:
         return dict(self._runtime_checkpoint_snapshot)

@@ -6,8 +6,8 @@ import logging
 import contextvars
 import traceback
 import asyncio
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Type, Callable, Awaitable
+from datetime import UTC, datetime
+from typing import Optional, Dict, Any, List, Type, Callable, Awaitable, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.auditing import Trace, TraceStatus
 from app.services.auditing.types.attributes import BaseTraceAttributes
@@ -88,6 +88,28 @@ class TraceManager:
         self.cleanup_tokens: List[Tuple[contextvars.ContextVar, contextvars.Token]] = []
         self.is_root = False
         self.held_buffer: Optional[List[Trace]] = None
+        self.held_flush_hooks: Optional[List[Callable[[], Awaitable[None]]]] = None
+
+    @staticmethod
+    def utcnow() -> datetime:
+        return datetime.now(UTC).replace(tzinfo=None)
+
+    @staticmethod
+    def current_trace_id() -> Optional[str]:
+        return _ctx_trace_id.get()
+
+    @staticmethod
+    def current_parent_span_uuid() -> Optional[str]:
+        stack = _ctx_span_stack.get()
+        return stack[-1] if stack else None
+
+    @staticmethod
+    def current_active_instance_id() -> Optional[int]:
+        return _ctx_active_instance_id.get()
+
+    @staticmethod
+    def current_business_context() -> tuple[Optional[str], Optional[str]]:
+        return _ctx_business_context.get()
 
     def _set_ctx(self, var: contextvars.ContextVar, value: Any):
         token = var.set(value)
@@ -106,7 +128,8 @@ class TraceManager:
             self._set_ctx(_ctx_flush_hooks, [])
             
         # 保存引用，供 Flush 使用，即使 Context 被重置
-        self.held_buffer = buffer 
+        self.held_buffer = buffer
+        self.held_flush_hooks = _ctx_flush_hooks.get()
 
         # 2. 确定 Trace ID (优先级策略)
         # A. 显式强推 (最高优先级，用于对接业务层生成的ID)
@@ -174,7 +197,7 @@ class TraceManager:
             # Payload (Snapshot inputs immediately)
             attributes=self.attributes.model_dump(mode='json'),
             status=TraceStatus.PENDING,
-            created_at=datetime.utcnow()
+            created_at=self.utcnow(),
         )
         
         # 9. 加入缓冲区
@@ -203,7 +226,7 @@ class TraceManager:
             
             # 1. 更新对象状态
             self.trace_obj.duration_ms = duration
-            self.trace_obj.processed_at = datetime.utcnow()
+            self.trace_obj.processed_at = self.utcnow()
             
             # 更新 attributes (主要是 Outputs 和 meta)
             # 因为 set_output 可能被调用过，我们需要重新 dump 并合并
@@ -242,7 +265,7 @@ class TraceManager:
 
         try:
             # 1. 执行钩子 (同步等待数据准备就绪)
-            hooks = _ctx_flush_hooks.get()
+            hooks = self.held_flush_hooks
             if hooks:
                 # 并发执行所有钩子，效率最高
                 await asyncio.gather(*[h() for h in hooks], return_exceptions=True)
@@ -263,6 +286,8 @@ class TraceManager:
         finally:
             # 清理引用，帮助 GC
             self.held_buffer.clear()
+            if self.held_flush_hooks is not None:
+                self.held_flush_hooks.clear()
 
     # --- Public Helpers ---
 

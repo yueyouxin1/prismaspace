@@ -1,8 +1,8 @@
 # src/app/engine/agent/main.py
 
 import asyncio
-import logging
 import json
+import logging
 from typing import Any, List, Optional
 
 from .base import (
@@ -52,6 +52,35 @@ class AgentEngineService:
             arguments=arguments,
         )
 
+    @staticmethod
+    def _build_checkpoint(
+        *,
+        phase: str,
+        messages: List[LLMMessage],
+        tools: List[Any],
+        pending_client_tool_calls: List[AgentClientToolCall],
+        next_iteration: int,
+        steps: List[AgentStep],
+        usage: LLMUsage,
+        reasoning_content: Optional[str],
+    ) -> AgentRuntimeCheckpoint:
+        return AgentRuntimeCheckpoint(
+            phase=phase,
+            messages=[msg.model_copy(deep=True) for msg in messages],
+            tools=[
+                tool.model_copy(deep=True) if hasattr(tool, "model_copy") else tool
+                for tool in tools
+            ],
+            pending_client_tool_calls=[
+                call.model_copy(deep=True) if hasattr(call, "model_copy") else call
+                for call in pending_client_tool_calls
+            ],
+            next_iteration=max(0, next_iteration),
+            steps=[step.model_copy(deep=True) for step in steps],
+            usage=usage.model_copy(deep=True),
+            reasoning_content=reasoning_content,
+        )
+
     async def run(
         self,
         agent_input: AgentInput,
@@ -60,29 +89,62 @@ class AgentEngineService:
         run_config: LLMRunConfig,
         tool_executor: BaseToolExecutor,
         callbacks: Optional[AgentEngineCallbacks] = None,
+        resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
     ) -> AgentResult:
         
         try:
             # --- 步骤 1: 上下文准备 ---
             if callbacks: await callbacks.on_agent_start()
-            
-            message_history = agent_input.messages.copy()
-            intermediate_steps: List[AgentStep] = []
-            all_reasoning_parts: List[str] = []
 
-            # 初始化总用量计数器
-            total_usage = LLMUsage()
+            restored_checkpoint = (
+                resume_checkpoint.model_copy(deep=True)
+                if resume_checkpoint is not None
+                else None
+            )
+            resumed_messages = [msg.model_copy(deep=True) for msg in agent_input.messages]
+            message_history = (
+                [msg.model_copy(deep=True) for msg in restored_checkpoint.messages] + resumed_messages
+                if restored_checkpoint is not None
+                else resumed_messages
+            )
+            intermediate_steps: List[AgentStep] = (
+                [step.model_copy(deep=True) for step in restored_checkpoint.steps]
+                if restored_checkpoint is not None
+                else []
+            )
+            all_reasoning_parts: List[str] = []
+            if restored_checkpoint is not None and restored_checkpoint.reasoning_content:
+                all_reasoning_parts.append(restored_checkpoint.reasoning_content)
+
+            total_usage = (
+                restored_checkpoint.usage.model_copy(deep=True)
+                if restored_checkpoint is not None
+                else LLMUsage()
+            )
+            checkpoint_tools = (
+                [
+                    tool.model_copy(deep=True) if hasattr(tool, "model_copy") else tool
+                    for tool in restored_checkpoint.tools
+                ]
+                if restored_checkpoint is not None and restored_checkpoint.tools
+                else list(run_config.tools or [])
+            )
+            start_iteration = restored_checkpoint.next_iteration if restored_checkpoint is not None else 0
 
             # --- 步骤 2: 启动 ReAct 循环 ---
-            for _ in range(self.max_iterations):
+            for iteration in range(start_iteration, self.max_iterations):
                 round_reasoning_chunks: List[str] = []
                 if callbacks:
                     await callbacks.on_checkpoint_snapshot(
-                        AgentRuntimeCheckpoint(
+                        self._build_checkpoint(
                             phase="before_llm",
-                            messages=[msg.model_copy(deep=True) for msg in message_history],
-                            tools=list(run_config.tools or []),
+                            messages=message_history,
+                            tools=checkpoint_tools,
                             pending_client_tool_calls=[],
+                            next_iteration=iteration,
+                            steps=intermediate_steps,
+                            usage=total_usage,
+                            reasoning_content="".join(all_reasoning_parts) or None,
                         )
                     )
 
@@ -234,11 +296,15 @@ class AgentEngineService:
                     if client_tool_calls:
                         if callbacks:
                             await callbacks.on_checkpoint_snapshot(
-                                AgentRuntimeCheckpoint(
+                                self._build_checkpoint(
                                     phase="interrupt",
-                                    messages=[msg.model_copy(deep=True) for msg in message_history],
-                                    tools=list(run_config.tools or []),
+                                    messages=message_history,
+                                    tools=checkpoint_tools,
                                     pending_client_tool_calls=client_tool_calls,
+                                    next_iteration=iteration + 1,
+                                    steps=intermediate_steps,
+                                    usage=total_usage,
+                                    reasoning_content=aggregated_reasoning,
                                 )
                             )
                         interrupt_result = AgentResult(
@@ -256,11 +322,15 @@ class AgentEngineService:
                     # 完成工具调用后，continue 进入下一轮循环，将工具结果发回给 LLM
                     if callbacks:
                         await callbacks.on_checkpoint_snapshot(
-                            AgentRuntimeCheckpoint(
+                            self._build_checkpoint(
                                 phase="after_tools",
-                                messages=[msg.model_copy(deep=True) for msg in message_history],
-                                tools=list(run_config.tools or []),
+                                messages=message_history,
+                                tools=checkpoint_tools,
                                 pending_client_tool_calls=[],
+                                next_iteration=iteration + 1,
+                                steps=intermediate_steps,
+                                usage=total_usage,
+                                reasoning_content=aggregated_reasoning,
                             )
                         )
                     continue 

@@ -77,13 +77,15 @@ class AgentRunExecutionService:
 
                 lock_ctx = service._session_lock(session.uuid) if session else nullcontext()
                 async with lock_ctx:
-                    resume_runtime_snapshot = None
+                    resume_checkpoint = None
                     if run_input and run_input.parent_run_id:
                         parent_execution = await service.execution_ledger_service.get_by_run_id(run_input.parent_run_id)
                         if parent_execution is not None:
                             parent_checkpoint = await service.run_persistence_service.get_checkpoint(execution_id=parent_execution.id)
                             if parent_checkpoint and isinstance(parent_checkpoint.runtime_snapshot, dict):
-                                resume_runtime_snapshot = parent_checkpoint.runtime_snapshot
+                                resume_checkpoint = service._restore_runtime_checkpoint(
+                                    parent_checkpoint.runtime_snapshot
+                                )
 
                     if session:
                         await service.db.refresh(session)
@@ -103,13 +105,15 @@ class AgentRunExecutionService:
                                 history=adapted.resume_messages,
                             )
 
-                    if resume_runtime_snapshot and resume_runtime_snapshot.get("messages"):
-                        history_messages = [
-                            item if isinstance(item, LLMMessage) else LLMMessage.model_validate(item)
-                            for item in (resume_runtime_snapshot.get("messages") or [])
+                    if resume_checkpoint is not None:
+                        final_messages = [
+                            item.model_copy(deep=True) if hasattr(item, "model_copy") else item
+                            for item in adapted.resume_messages
                         ]
-                        final_messages = history_messages
-                        final_tools = resume_runtime_snapshot.get("tools") or []
+                        final_tools = [
+                            tool.model_copy(deep=True) if hasattr(tool, "model_copy") else tool
+                            for tool in (resume_checkpoint.tools or [])
+                        ]
                         rendered_system_prompt = ""
                         prompt_variables = {}
                         pipeline_manager = None
@@ -161,7 +165,7 @@ class AgentRunExecutionService:
                         stream=True,
                     )
 
-                    if session:
+                    if session and resume_checkpoint is None:
                         session_manager.buffer_message(
                             role=AgentMessageRole.USER,
                             message_uuid=message_ids.user_message_id if message_ids else None,
@@ -186,6 +190,7 @@ class AgentRunExecutionService:
                                 tool_executor=pipeline_manager.tool_executor if pipeline_manager is not None else tool_executor,
                                 callbacks=callbacks,
                                 usage_accumulator=usage_accumulator,
+                                resume_checkpoint=resume_checkpoint,
                             )
                             final_result = result
                             root_span.set_output(result)

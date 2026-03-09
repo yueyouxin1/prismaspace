@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Dict, Any, List, Optional, Literal
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
+from app.schemas.resource.runtime_checkpoint import RuntimeCheckpointEnvelopeRead
 from app.engine.workflow import (
     NodeResultData, ParameterSchema
 )
@@ -197,6 +198,7 @@ class WorkflowCheckpointRead(BaseModel):
     step_index: int
     reason: str
     node_id: Optional[str] = None
+    canonical: Optional[RuntimeCheckpointEnvelopeRead] = None
     created_at: datetime
 
     @model_validator(mode="before")

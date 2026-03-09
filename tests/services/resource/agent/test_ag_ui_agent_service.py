@@ -13,7 +13,7 @@ from app.services.resource.agent.ag_ui_processor import AgUiProcessor
 from app.services.resource.agent.agent_service import AgentService
 from app.services.resource.agent.ag_ui_normalizer import AgUiNormalizer
 from app.services.resource.agent.protocol_adapter import AgUiProtocolAdapter
-from app.services.exceptions import ServiceException
+from app.services.exceptions import ActiveRunExistsError, ServiceException
 
 
 def _build_run_input(**overrides):
@@ -436,6 +436,7 @@ async def test_resume_interrupt_uses_checkpoint_pending_tool_calls(monkeypatch):
     monkeypatch.setattr("app.services.resource.agent.run_preparation.ResourceAwareToolExecutor", lambda context, workspace: SimpleNamespace())
     service.ref_dao = SimpleNamespace(get_dependencies=AsyncMock(return_value=[]))
     service.execution_ledger_service = SimpleNamespace(
+        get_latest_active_execution=AsyncMock(return_value=None),
         resolve_parent_execution=AsyncMock(return_value=parent_execution),
         resolve_lineage_root_run_id=AsyncMock(return_value="turn-1"),
     )
@@ -570,3 +571,41 @@ async def test_execute_non_stream_returns_event_list():
     assert response.thread_id == "thread-1"
     assert response.run_id == "run-1"
     assert [item["type"] for item in response.events] == ["RUN_STARTED", "TEXT_MESSAGE_CONTENT", "RUN_FINISHED"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_async_run_rejects_duplicate_active_thread(monkeypatch):
+    service = object.__new__(AgentService)
+    actor = SimpleNamespace(id=1)
+    instance = SimpleNamespace(
+        id=101,
+        uuid="agent-1",
+        agent_config={},
+        resource=SimpleNamespace(workspace=SimpleNamespace(id=9)),
+    )
+
+    service.get_by_uuid = AsyncMock(return_value=instance)
+    service._check_execute_perm = AsyncMock(return_value=None)
+    service._resolve_runtime_workspace = AsyncMock(return_value=SimpleNamespace(id=9))
+    service.protocol_adapters = SimpleNamespace(get=lambda _: AgUiProtocolAdapter())
+    monkeypatch.setattr("app.services.resource.agent.run_preparation.ResourceAwareToolExecutor", lambda context, workspace: SimpleNamespace())
+    service.ref_dao = SimpleNamespace(get_dependencies=AsyncMock(return_value=[]))
+    service.execution_ledger_service = SimpleNamespace(
+        get_latest_active_execution=AsyncMock(return_value=SimpleNamespace(run_id="run-existing")),
+    )
+    service._normalize_thread_id = AgentService._normalize_thread_id
+    service._resolve_session_mode = AgentService._resolve_session_mode
+    service._requires_persistent_session_binding = AgentService._requires_persistent_session_binding
+    service._normalize_parent_run_id = AgentService._normalize_parent_run_id
+    service._normalize_interrupt_id = AgentService._normalize_interrupt_id
+    service._resolve_protocol_name = AgentService._resolve_protocol_name
+    service.context = SimpleNamespace()
+    service.db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with pytest.raises(ActiveRunExistsError, match="active agent run already exists"):
+        await service._prepare_async_run(
+            instance_uuid="agent-1",
+            run_input=_build_run_input(),
+            actor=actor,
+            runtime_workspace=None,
+        )

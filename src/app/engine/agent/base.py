@@ -34,10 +34,15 @@ class AgentResult(BaseModel):
 
 
 class AgentRuntimeCheckpoint(BaseModel):
+    schema_version: int = 1
     phase: Literal["before_llm", "after_tools", "interrupt"]
     messages: List[LLMMessage] = Field(default_factory=list)
     tools: List[LLMTool] = Field(default_factory=list)
     pending_client_tool_calls: List[AgentClientToolCall] = Field(default_factory=list)
+    next_iteration: int = 0
+    steps: List[AgentStep] = Field(default_factory=list)
+    usage: LLMUsage = Field(default_factory=LLMUsage)
+    reasoning_content: Optional[str] = None
 
 
 class ToolExecutionInterrupt(BaseModel):

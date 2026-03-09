@@ -19,8 +19,10 @@ from app.engine.utils.parameter_schema_utils import schemas2obj
 from app.engine.utils.stream import StreamBroadcaster
 from app.engine.workflow.definitions import NodeExecutionResult, NodeResultData, ParameterSchema, WorkflowInterrupt, WorkflowInterruptSignal
 from app.engine.workflow.registry import BaseNode, register_node
+from app.core.trace_manager import TraceManager
 from app.schemas.resource.execution_schemas import GenericExecutionRequest
 from app.services.common.llm_capability_provider import UsageAccumulator
+from app.services.auditing.types.attributes import WorkflowAttributes
 from app.services.exceptions import NotFoundError
 from app.utils.async_generator import AsyncGeneratorManager
 
@@ -687,14 +689,23 @@ class AppWorkflowNode(BaseNode):
                 trace_id=getattr(external_context, "trace_id", None),
             )
             await app_context.db.commit()
-            final_result = await workflow_service.engine_service.run(
-                workflow_def=runtime_plan,
-                payload=node_input,
-                callbacks=None,
-                external_context=child_external_context,
-                interceptors=[trace_interceptor],
-                runtime_observer=runtime_observer,
-            )
+            async with TraceManager(
+                db=app_context.db,
+                operation_name="workflow.run",
+                user_id=app_context.actor.id,
+                force_trace_id=getattr(external_context, "trace_id", None),
+                target_instance_id=child_instance.id,
+                attributes=WorkflowAttributes(inputs=node_input),
+            ) as child_workflow_span:
+                final_result = await workflow_service.engine_service.run(
+                    workflow_def=runtime_plan,
+                    payload=node_input,
+                    callbacks=None,
+                    external_context=child_external_context,
+                    interceptors=[trace_interceptor],
+                    runtime_observer=runtime_observer,
+                )
+                child_workflow_span.set_output(final_result)
             await workflow_service.execution_ledger_service.mark_finished(
                 child_execution,
                 status=ResourceExecutionStatus.SUCCEEDED,

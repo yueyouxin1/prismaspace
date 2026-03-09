@@ -31,7 +31,8 @@ from app.engine.agent import (
     AgentResult, 
     AgentEngineCallbacks, 
     BaseToolExecutor,
-    AgentStep
+    AgentStep,
+    AgentRuntimeCheckpoint,
 )
 
 logger = logging.getLogger(__name__)
@@ -269,7 +270,8 @@ class AICapabilityProvider:
         run_config: LLMRunConfig,
         tool_executor: BaseToolExecutor,
         callbacks: Optional[AgentEngineCallbacks] = None,
-        max_iterations: int = 10
+        max_iterations: int = 10,
+        resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
     ) -> AgentResult:
         provider_config = self._build_llm_provider_config(module_context)
 
@@ -283,7 +285,8 @@ class AICapabilityProvider:
             provider_config=provider_config,
             run_config=run_config,
             tool_executor=tool_executor,
-            callbacks=callbacks
+            callbacks=callbacks,
+            resume_checkpoint=resume_checkpoint,
         )
 
     async def execute_agent_with_billing(
@@ -295,18 +298,31 @@ class AICapabilityProvider:
         tool_executor: BaseToolExecutor,
         callbacks: AgentEngineCallbacks,
         usage_accumulator: UsageAccumulator,
-        max_iterations: int = 10
+        max_iterations: int = 10,
+        resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
     ) -> AgentResult:
         """
         [Composite] 执行 Agent 并计费。
         """
-        estimated_input = len(str(agent_input.messages)) // 3
+        effective_input_messages = list(agent_input.messages)
+        if resume_checkpoint is not None:
+            effective_input_messages = [
+                *resume_checkpoint.messages,
+                *effective_input_messages,
+            ]
+        estimated_input = len(str(effective_input_messages)) // 3
         # 宽松预估：Agent 会多次调用 LLM，所以预估量适当放大
         estimated_output = run_config.max_tokens * 2 
 
         async def _task():
             return await self.execute_agent(
-                module_context, agent_input, run_config, tool_executor, callbacks, max_iterations
+                module_context,
+                agent_input,
+                run_config,
+                tool_executor,
+                callbacks,
+                max_iterations,
+                resume_checkpoint,
             )
 
         return await self.with_billing(

@@ -6,6 +6,7 @@ from typing import Literal, Union, Dict, List, Any, Optional
 from datetime import datetime
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig
+from app.schemas.resource.runtime_checkpoint import RuntimeCheckpointEnvelopeRead
 from app.engine.model.llm import LLMMessage
 from app.schemas.common import ExecutionRequest, ExecutionResponse
 from app.schemas.protocol import RunAgentInputExt, RunEventsResponse
@@ -241,6 +242,7 @@ class AgentRunCheckpointRead(BaseModel):
     checkpoint_kind: str
     runtime_snapshot: Dict[str, Any] = Field(default_factory=dict)
     pending_client_tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
+    canonical: Optional[RuntimeCheckpointEnvelopeRead] = None
     created_at: datetime
     updated_at: datetime
 

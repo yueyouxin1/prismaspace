@@ -116,3 +116,44 @@ async def test_execution_ledger_parent_resolution_requires_same_thread(
         thread_id="thread-1",
     )
     assert root_run_id == parent.run_id
+
+
+async def test_execution_ledger_active_lookup_includes_pending_and_running(
+    created_resource_factory,
+    app_context_factory,
+    registered_user_with_pro: UserContext,
+):
+    resource = await created_resource_factory("agent")
+    instance = resource.workspace_instance
+    actor = registered_user_with_pro.user
+    context = await app_context_factory(actor)
+    service = ExecutionLedgerService(context)
+
+    pending_execution = await service.create_execution(instance=instance, actor=actor, thread_id="thread-1")
+    running_execution = await service.create_execution(instance=instance, actor=actor, thread_id="thread-2")
+    interrupted_execution = await service.create_execution(instance=instance, actor=actor, thread_id="thread-3")
+
+    await service.mark_running(running_execution)
+    await service.mark_finished(interrupted_execution, status=ResourceExecutionStatus.INTERRUPTED)
+
+    active_pending = await service.get_latest_active_execution(
+        instance=instance,
+        actor=actor,
+        thread_id="thread-1",
+    )
+    active_running = await service.get_latest_active_execution(
+        instance=instance,
+        actor=actor,
+        thread_id="thread-2",
+    )
+    inactive_interrupted = await service.get_latest_active_execution(
+        instance=instance,
+        actor=actor,
+        thread_id="thread-3",
+    )
+
+    assert active_pending is not None
+    assert active_pending.run_id == pending_execution.run_id
+    assert active_running is not None
+    assert active_running.run_id == running_execution.run_id
+    assert inactive_interrupted is None

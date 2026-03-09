@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.engine.agent import AgentEngineService, AgentInput, AgentEngineCallbacks, BaseToolExecutor, ToolExecutionInterrupt
@@ -88,6 +90,7 @@ class _RecordingCallbacks(AgentEngineCallbacks):
         self.cancelled_result = None
         self.error = None
         self.usage = []
+        self.checkpoints = []
 
     async def on_agent_start(self):
         self.started = True
@@ -121,6 +124,9 @@ class _RecordingCallbacks(AgentEngineCallbacks):
 
     async def on_usage(self, usage):
         self.usage.append(usage)
+
+    async def on_checkpoint_snapshot(self, snapshot):
+        self.checkpoints.append(snapshot)
 
 
 @pytest.mark.asyncio
@@ -185,3 +191,106 @@ async def test_multi_tool_same_round_only_first_step_keeps_thought():
     assert len(result.steps) == 2
     assert result.steps[0].thought == "same-round-thought"
     assert result.steps[1].thought is None
+
+
+@pytest.mark.asyncio
+async def test_agent_engine_resume_checkpoint_restores_stack_and_appends_tool_results():
+    local_tool_call = LLMToolCall(
+        id="call-local",
+        type="function",
+        function={"name": "local_a", "arguments": "{\"x\":1}"},
+    )
+    client_tool_call = LLMToolCall(
+        id="call-client",
+        type="function",
+        function={"name": "ask_user_confirm", "arguments": "{\"question\":\"ship?\"}"},
+    )
+
+    class _ResumableLLMEngine:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, provider_config, run_config, messages, callbacks):
+            self.calls.append([message.model_copy(deep=True) for message in messages])
+            call_index = len(self.calls) - 1
+
+            if call_index == 0:
+                await callbacks.on_reasoning_chunk("local-round")
+                await callbacks.on_tool_calls_generated([local_tool_call])
+                return LLMResult(
+                    message=LLMMessage(role="assistant", tool_calls=[local_tool_call.model_dump(mode="json")]),
+                    usage=LLMUsage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
+                )
+
+            if call_index == 1:
+                await callbacks.on_reasoning_chunk("client-round")
+                await callbacks.on_tool_calls_generated([client_tool_call])
+                return LLMResult(
+                    message=LLMMessage(role="assistant", tool_calls=[client_tool_call.model_dump(mode="json")]),
+                    usage=LLMUsage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+                )
+
+            assert messages[-1].role == "tool"
+            assert messages[-1].tool_call_id == "call-client"
+            assert json.loads(messages[-1].content) == {"approved": True}
+            await callbacks.on_reasoning_chunk("resume-round")
+            await callbacks.on_chunk_generated("done")
+            return LLMResult(
+                message=LLMMessage(role="assistant", content="done"),
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class _MixedToolExecutor(BaseToolExecutor):
+        async def execute(self, tool_name, tool_args):
+            if tool_name == "ask_user_confirm":
+                return ToolExecutionInterrupt(payload={"tool_name": tool_name, "tool_args": tool_args})
+            return {"tool": tool_name, "args": tool_args}
+
+        def get_llm_tools(self):
+            return []
+
+    llm_engine = _ResumableLLMEngine()
+    tool_executor = _MixedToolExecutor()
+    initial_callbacks = _RecordingCallbacks()
+    engine = AgentEngineService(llm_engine=llm_engine, max_iterations=5)
+
+    interrupted = await engine.run(
+        agent_input=AgentInput(messages=[LLMMessage(role="user", content="start")]),
+        provider_config=LLMProviderConfig(client_name="openai", api_key="dummy"),
+        run_config=LLMRunConfig(model="gpt-test", stream=True),
+        tool_executor=tool_executor,
+        callbacks=initial_callbacks,
+    )
+
+    assert interrupted.outcome == "interrupted"
+    interrupt_checkpoint = initial_callbacks.checkpoints[-1]
+    assert interrupt_checkpoint.phase == "interrupt"
+    assert interrupt_checkpoint.next_iteration == 2
+    assert len(interrupt_checkpoint.steps) == 1
+    assert interrupt_checkpoint.steps[0].action.id == "call-local"
+    assert interrupt_checkpoint.usage.total_tokens == 7
+
+    resumed_callbacks = _RecordingCallbacks()
+    resumed = await engine.run(
+        agent_input=AgentInput(
+            messages=[
+                LLMMessage(
+                    role="tool",
+                    tool_call_id="call-client",
+                    content='{"approved": true}',
+                )
+            ]
+        ),
+        provider_config=LLMProviderConfig(client_name="openai", api_key="dummy"),
+        run_config=LLMRunConfig(model="gpt-test", stream=True),
+        tool_executor=tool_executor,
+        callbacks=resumed_callbacks,
+        resume_checkpoint=interrupt_checkpoint,
+    )
+
+    assert resumed.outcome == "completed"
+    assert len(resumed.steps) == 1
+    assert resumed.steps[0].action.id == "call-local"
+    assert resumed.usage.total_tokens == 9
+    assert resumed.reasoning_content == "local-roundclient-roundresume-round"
+    assert llm_engine.calls[2][-1].tool_call_id == "call-client"

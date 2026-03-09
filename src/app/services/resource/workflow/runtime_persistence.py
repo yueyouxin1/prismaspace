@@ -18,6 +18,11 @@ from app.models.resource.workflow import (
     WorkflowExecutionCheckpoint,
     WorkflowNodeExecution,
 )
+from app.schemas.resource.runtime_checkpoint import (
+    RuntimeCheckpointEnvelopeRead,
+    RuntimeCheckpointSummaryRead,
+)
+from app.schemas.resource.workflow.workflow_schemas import WorkflowCheckpointRead
 from app.services.base_service import BaseService
 from app.dao.resource.workflow.workflow_runtime_dao import (
     WorkflowExecutionCheckpointDao,
@@ -131,6 +136,48 @@ class WorkflowRuntimePersistenceService(BaseService):
         execution_id: int,
     ) -> Optional[WorkflowExecutionCheckpoint]:
         return await self.checkpoint_dao.get_latest_by_execution_id(execution_id)
+
+    def build_checkpoint_read(
+        self,
+        *,
+        execution: ResourceExecution,
+        checkpoint: WorkflowExecutionCheckpoint,
+    ) -> WorkflowCheckpointRead:
+        reason = checkpoint.reason.value if hasattr(checkpoint.reason, "value") else str(checkpoint.reason)
+        canonical = RuntimeCheckpointEnvelopeRead(
+            schema_version=1,
+            resource_type="workflow",
+            engine="workflow/runtime-plan",
+            checkpoint_kind="durable",
+            phase=None,
+            reason=reason,
+            run_id=execution.run_id,
+            thread_id=execution.thread_id,
+            parent_run_id=execution.parent_run_id,
+            trace_id=execution.trace_id,
+            created_at=checkpoint.created_at,
+            updated_at=checkpoint.created_at,
+            summary=RuntimeCheckpointSummaryRead(
+                step_index=checkpoint.step_index,
+                ready_queue_size=len(checkpoint.ready_queue or []),
+                node_state_count=len(checkpoint.node_states or {}),
+            ),
+            state={
+                "runtime_plan": checkpoint.runtime_plan or {},
+                "payload": checkpoint.payload or {},
+                "variables": checkpoint.variables or {},
+                "node_states": checkpoint.node_states or {},
+                "ready_queue": checkpoint.ready_queue or [],
+            },
+        )
+        return WorkflowCheckpointRead(
+            id=checkpoint.id,
+            step_index=checkpoint.step_index,
+            reason=reason,
+            node_id=checkpoint.node_id,
+            canonical=canonical,
+            created_at=checkpoint.created_at,
+        )
 
     def build_resume_snapshot(
         self,

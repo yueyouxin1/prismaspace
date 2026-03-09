@@ -745,8 +745,13 @@ class KnowledgeBaseService(ResourceImplementationService):
                     for uid in instance_uuids
                 ]
 
-            async with TraceManager(self.db, "knowledge.batch_search", actor.id, attributes=KnowledgeBaseAttributes(inputs=inputs)) as span:
-                
+            async with TraceManager(
+                self.db,
+                "knowledge.batch_search",
+                actor.id,
+                attributes=KnowledgeBaseAttributes(inputs=inputs),
+            ) as span:
+
                 # 1. Batch Load & Validate
                 instances = await self.dao.get_by_uuids(instance_uuids)
                 if len(instances) != len(set(instance_uuids)):
@@ -754,6 +759,9 @@ class KnowledgeBaseService(ResourceImplementationService):
                     found_uuids = {inst.uuid for inst in instances}
                     missing = set(instance_uuids) - found_uuids
                     raise NotFoundError(f"KnowledgeBase instances not found: {missing}")
+
+                if len(instances) == 1 and span.trace_obj is not None:
+                    span.trace_obj.target_instance_id = instances[0].id
 
                 # 2. Grouping, Reverse Indexing & Pre-aggregation (Single Pass)
                 # Physical Group Key: (engine_alias, embedding_module_version_id)

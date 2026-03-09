@@ -11,6 +11,7 @@ from app.core.context import AppContext
 from app.db.session import SessionLocal
 from app.schemas.protocol import RunAgentInputExt
 from app.services.resource.agent.agent_service import AgentService
+from app.services.exceptions import ActiveRunExistsError
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,60 @@ class AgentSessionHandler:
                     }
                 )
                 return
+            target_run_id = target_run_id or self.current_run_id
+            if not target_run_id:
+                await self._send_json(
+                    {
+                        "type": "CUSTOM",
+                        "name": "ps.control.cancel_ignored",
+                        "value": {"status": "no_active_run"},
+                    }
+                )
+                return
+            try:
+                await self._request_run_cancel(target_run_id)
+            except Exception as exc:
+                await self._send_run_error(
+                    run_id=target_run_id,
+                    thread_id="unknown",
+                    code="AGENT_CANCEL_ERROR",
+                    message=str(exc),
+                )
+                return
             await self._cancel_current_task()
             await self._send_json(
                 {
                     "type": "CUSTOM",
                     "name": "ps.control.cancelled",
-                    "value": {"status": "ok"},
+                    "value": {"status": "ok", "runId": target_run_id},
                 }
             )
+            return
+
+        if (
+            isinstance(payload, dict)
+            and payload.get("type") == "CUSTOM"
+            and payload.get("name") == "ps.attach_run"
+        ):
+            value = payload.get("value")
+            target_run_id = value.get("runId") if isinstance(value, dict) else None
+            after_seq = value.get("afterSeq") if isinstance(value, dict) else 0
+            if not isinstance(target_run_id, str) or not target_run_id.strip():
+                await self._send_run_error(
+                    run_id="unknown",
+                    thread_id="unknown",
+                    code="AG_UI_ATTACH_VALIDATION_ERROR",
+                    message="ps.attach_run requires value.runId.",
+                )
+                return
+            if not isinstance(after_seq, int) or after_seq < 0:
+                after_seq = 0
+            await self._cancel_current_task()
+            self.current_run_id = target_run_id.strip()
+            self.current_task = asyncio.create_task(
+                self._attach_live_run(self.current_run_id, after_seq=after_seq)
+            )
+            self.current_task.add_done_callback(self._cleanup_task)
             return
 
         try:
@@ -137,18 +184,18 @@ class AgentSessionHandler:
             )
             service = AgentService(app_context)
             try:
-                active_run = await service.get_active_run(agent_uuid, self.user, run_input.thread_id)
-                if active_run:
-                    active_run_id = active_run["run_id"] if isinstance(active_run, dict) else getattr(active_run, "run_id", None)
-                    self.current_run_id = active_run_id
-                    async for envelope in service.stream_live_run_events(active_run_id, after_seq=0):
-                        await self._send_event(envelope.get("payload", envelope))
-                else:
-                    run_result = await service.async_execute(agent_uuid, run_input, self.user)
-                    cancel_fn = getattr(run_result, "cancel", None)
-                    self.current_run_id = getattr(run_result, "run_id", None)
-                    async for event in run_result.generator:
-                        await self._send_event(event)
+                run_result = await service.async_execute(agent_uuid, run_input, self.user)
+                cancel_fn = getattr(run_result, "cancel", None)
+                self.current_run_id = getattr(run_result, "run_id", None)
+                async for event in run_result.generator:
+                    await self._send_event(event)
+            except ActiveRunExistsError as exc:
+                await self._send_run_error(
+                    run_id=run_input.run_id,
+                    thread_id=run_input.thread_id,
+                    code="AGENT_ACTIVE_RUN_EXISTS",
+                    message=str(exc),
+                )
             except asyncio.CancelledError:
                 if callable(cancel_fn):
                     cancel_fn()
@@ -179,6 +226,44 @@ class AgentSessionHandler:
                         await run_result.task
                     except Exception:
                         pass
+
+    async def _attach_live_run(self, run_id: str, *, after_seq: int = 0):
+        async with SessionLocal() as db:
+            app_context = AppContext(
+                db=db,
+                db_session_factory=SessionLocal,
+                auth=self.auth_context,
+                redis_service=self.websocket.app.state.redis_service,
+                vector_manager=self.websocket.app.state.vector_manager,
+                arq_pool=self.websocket.app.state.arq_pool,
+            )
+            service = AgentService(app_context)
+            try:
+                async for envelope in service.stream_live_run_events(run_id, after_seq=after_seq):
+                    await self._send_event(envelope.get("payload", envelope))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("AG-UI websocket live attach failed: %s", exc, exc_info=True)
+                await self._send_run_error(
+                    run_id=run_id,
+                    thread_id="unknown",
+                    code="AGENT_LIVE_ATTACH_ERROR",
+                    message=str(exc),
+                )
+
+    async def _request_run_cancel(self, run_id: str):
+        async with SessionLocal() as db:
+            app_context = AppContext(
+                db=db,
+                db_session_factory=SessionLocal,
+                auth=self.auth_context,
+                redis_service=self.websocket.app.state.redis_service,
+                vector_manager=self.websocket.app.state.vector_manager,
+                arq_pool=self.websocket.app.state.arq_pool,
+            )
+            service = AgentService(app_context)
+            await service.cancel_run(run_id)
 
     async def _send_event(self, event: Any):
         if hasattr(event, "model_dump_json"):

@@ -14,7 +14,7 @@ from app.schemas.resource.agent.agent_schemas import AgentRunDetailRead, AgentRu
 from app.observability import observe_agent_stream_event
 from app.services.resource.agent.agent_service import AgentService
 from .ws_handler import AgentSessionHandler
-from app.services.exceptions import ServiceException
+from app.services.exceptions import ActiveRunExistsError, ServiceException
 
 router = APIRouter()
 
@@ -157,24 +157,24 @@ async def stream_agent(
         thread_id = request.thread_id
         run_id = request.run_id
         try:
-            active_run = await service.get_active_run(uuid, context.actor, request.thread_id)
-            if active_run:
-                active_run_id = active_run["run_id"] if isinstance(active_run, dict) else getattr(active_run, "run_id", None)
-                active_thread_id = active_run["thread_id"] if isinstance(active_run, dict) else getattr(active_run, "thread_id", None)
-                run_id = active_run_id or run_id
-                thread_id = active_thread_id or thread_id
-                async for envelope in service.stream_live_run_events(run_id, after_seq=0):
-                    event = envelope.get("payload", envelope)
-                    observe_agent_stream_event(event)
-                    yield _encode(event)
-            else:
-                run_result = await service.async_execute(uuid, request, context.actor)
-                cancel_fn = getattr(run_result, "cancel", None)
-                thread_id = getattr(run_result, "thread_id", None) or thread_id
-                run_id = getattr(run_result, "run_id", run_id)
-                async for event in run_result.generator:
-                    observe_agent_stream_event(event)
-                    yield _encode(event)
+            run_result = await service.async_execute(uuid, request, context.actor)
+            cancel_fn = getattr(run_result, "cancel", None)
+            thread_id = getattr(run_result, "thread_id", None) or thread_id
+            run_id = getattr(run_result, "run_id", run_id)
+            async for event in run_result.generator:
+                observe_agent_stream_event(event)
+                yield _encode(event)
+        except ActiveRunExistsError as exc:
+            yield _encode(
+                RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    threadId=thread_id,
+                    runId=run_id,
+                    code="AGENT_ACTIVE_RUN_EXISTS",
+                    message=str(exc),
+                    retriable=True,
+                )
+            )
         except GeneratorExit:
             detached = True
             raise

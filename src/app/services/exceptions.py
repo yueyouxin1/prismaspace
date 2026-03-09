@@ -33,3 +33,8 @@ class NotFoundError(ServiceException):
 class PermissionDeniedError(ServiceException):
     """Raised if a required system configuration (e.g., a product) is missing."""
     pass
+
+
+class ActiveRunExistsError(ServiceException):
+    """Raised when a thread already has an active run and the caller should attach instead."""
+    pass

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Optional, Set
-from sqlalchemy import desc
-
 from app.core.context import AppContext
 from app.dao.resource.execution_dao import ResourceExecutionDao
 from app.models import ResourceExecution, ResourceExecutionStatus, ResourceInstance, User
@@ -56,14 +54,10 @@ class ExecutionLedgerService(BaseService):
         actor: User,
         thread_id: str,
     ) -> Optional[ResourceExecution]:
-        return await self.dao.get_one(
-            where=[
-                self.dao.model.resource_instance_id == instance.id,
-                self.dao.model.user_id == actor.id,
-                self.dao.model.thread_id == thread_id,
-                self.dao.model.status == ResourceExecutionStatus.RUNNING,
-            ],
-            order=[desc(self.dao.model.created_at), desc(self.dao.model.id)],
+        return await self.dao.get_latest_active_by_instance_user_thread(
+            resource_instance_id=instance.id,
+            user_id=actor.id,
+            thread_id=thread_id,
         )
 
     async def resolve_parent_execution(

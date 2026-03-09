@@ -22,6 +22,7 @@ from app.api.v1 import permission
 from app.api.v1 import feature
 from app.api.v1 import product
 from app.api.v1.agent import agent_api, agent_memory, session_api
+from app.api.v1.auditing import trace_api
 from app.api.v1.workflow import workflow_api
 
 # The main router for API v1
@@ -141,6 +142,7 @@ router.include_router(agent_api.router, prefix="/agent", tags=["Resource - Agent
 router.include_router(session_api.router, prefix="/agent", tags=["Resource - Agent - Session"])
 router.include_router(agent_memory.router, prefix="/agent/memory", tags=["Resource - Agent - Memory"])
 router.include_router(workflow_api.router, prefix="/workflow", tags=["Resource - Workflow"])
+router.include_router(trace_api.router, prefix="/traces", tags=["Observability - Traces"])
 
 # The universal execution endpoint
 router.include_router(execution.router, prefix="/execute", tags=["Execution"])

@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.engine.agent import AgentResult
-from app.engine.model.llm import LLMMessage, LLMUsage
+from app.engine.agent.base import AgentRuntimeCheckpoint, AgentClientToolCall
+from app.engine.model.llm import LLMMessage, LLMTool, LLMUsage
+from app.schemas.protocol import RunAgentInputExt
 from app.schemas.resource.agent.agent_schemas import AgentConfig
 from app.services.resource.agent import agent_service as agent_service_module
 from app.services.resource.agent.agent_service import AgentService
@@ -208,3 +210,162 @@ async def test_background_task_locks_preflight_and_commits_before_terminal_event
     session_manager.dispatch_post_commit_jobs.assert_awaited_once()
     assert captured["history"][0].content == "custom-history"
     assert order == ["mark_finished", "db.commit", "emit_terminal"]
+
+
+async def test_background_task_passes_resume_messages_as_delta_with_canonical_checkpoint():
+    service = object.__new__(AgentService)
+    captured = {}
+
+    class FakeTraceManager:
+        force_trace_id = "trace-1"
+
+        async def __aenter__(self):
+            return SimpleNamespace(attributes=None, set_output=lambda _result: None)
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    class FakeAIProvider:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def execute_agent_with_billing(self, **kwargs):
+            captured["agent_input"] = kwargs["agent_input"]
+            captured["resume_checkpoint"] = kwargs.get("resume_checkpoint")
+            result = AgentResult(
+                message=LLMMessage(role="assistant", content="resumed"),
+                steps=[],
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                outcome="completed",
+            )
+            await kwargs["callbacks"].on_agent_finish(result)
+            return result
+
+    resume_checkpoint = AgentRuntimeCheckpoint(
+        phase="interrupt",
+        messages=[
+            LLMMessage(role="user", content="hello"),
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "ask_user_confirm", "arguments": "{\"question\":\"go?\"}"},
+                    }
+                ],
+            ),
+        ],
+        tools=[
+            LLMTool(
+                type="function",
+                function={
+                    "name": "ask_user_confirm",
+                    "description": "Ask user confirmation",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                },
+            )
+        ],
+        pending_client_tool_calls=[
+            AgentClientToolCall(tool_call_id="call-1", name="ask_user_confirm", arguments={"question": "go?"})
+        ],
+        next_iteration=1,
+        reasoning_content="waiting",
+    )
+
+    run_input = RunAgentInputExt.model_validate(
+        {
+            "threadId": "thread-1",
+            "runId": "run-1",
+            "state": {},
+            "messages": [{"id": "a1", "role": "assistant", "content": "waiting"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {"platform": {"sessionMode": "stateless"}},
+        }
+    ).model_copy(update={"parent_run_id": "parent-1"})
+
+    service.ai_provider = FakeAIProvider()
+    service.context = SimpleNamespace(actor=SimpleNamespace(id=42))
+    service.module_service = SimpleNamespace(
+        get_runtime_context=AsyncMock(
+            return_value=SimpleNamespace(
+                version=SimpleNamespace(name="gpt-test", attributes={"context_window": 2048})
+            )
+        )
+    )
+    service.execution_ledger_service = SimpleNamespace(
+        get_by_run_id=AsyncMock(return_value=SimpleNamespace(id=99)),
+        mark_running=AsyncMock(),
+        mark_finished=AsyncMock(),
+    )
+    service.run_persistence_service = SimpleNamespace(
+        get_checkpoint=AsyncMock(
+            return_value=SimpleNamespace(
+                runtime_snapshot=resume_checkpoint.model_dump(mode="json", by_alias=True, exclude_none=True)
+            )
+        )
+    )
+    service.live_event_service = SimpleNamespace(record_event=AsyncMock())
+    service.db = SimpleNamespace(
+        refresh=AsyncMock(),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+    service._session_lock = AsyncMock()
+    service._should_cancel_run = AsyncMock(return_value=False)
+    service._clear_cancel_run = AsyncMock()
+    service._delete_run_checkpoint = AsyncMock()
+    service._upsert_run_checkpoint = AsyncMock()
+    service._persist_agent_run_artifacts = AsyncMock()
+    service._resolve_model_context_window = AgentService._resolve_model_context_window
+    service._restore_runtime_checkpoint = AgentService._restore_runtime_checkpoint
+    service.build_interrupt_id = AgentService.build_interrupt_id
+
+    adapted = ProtocolAdaptedRun(
+        input_content="",
+        thread_id="thread-1",
+        client_tools=[],
+        custom_history=[],
+        resume_messages=[
+            LLMMessage(
+                role="tool",
+                tool_call_id="call-1",
+                content='{"approved": true}',
+            )
+        ],
+        has_custom_history=False,
+        resume_tool_call_ids=["call-1"],
+        resume_interrupt_id="parent-1",
+    )
+
+    await service._run_agent_background_task(
+        agent_config=AgentConfig(),
+        llm_module_version=SimpleNamespace(id=1),
+        runtime_workspace=SimpleNamespace(id=9),
+        trace_manager=FakeTraceManager(),
+        generator_manager=AsyncGeneratorManager(),
+        execution=SimpleNamespace(id=1, run_id="run-1", thread_id="thread-1"),
+        turn_id="turn-1",
+        session_manager=None,
+        run_input=run_input,
+        message_ids=AgentStreamMessageIds(
+            user_message_id="user-1",
+            assistant_message_id="assistant-1",
+            reasoning_message_id="reasoning-1",
+            activity_message_id="activity-1",
+        ),
+        dependencies=[],
+        adapted=adapted,
+        tool_executor=SimpleNamespace(),
+        agent_instance=SimpleNamespace(version_id=7, system_prompt="system"),
+    )
+
+    assert captured["resume_checkpoint"] is not None
+    assert captured["resume_checkpoint"].phase == "interrupt"
+    assert len(captured["agent_input"].messages) == 1
+    assert captured["agent_input"].messages[0].role == "tool"
+    assert captured["agent_input"].messages[0].tool_call_id == "call-1"

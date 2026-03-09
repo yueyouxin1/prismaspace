@@ -13,6 +13,10 @@ from app.schemas.resource.agent.agent_schemas import (
     AgentRunSummaryRead,
     AgentToolExecutionRead,
 )
+from app.schemas.resource.runtime_checkpoint import (
+    RuntimeCheckpointEnvelopeRead,
+    RuntimeCheckpointSummaryRead,
+)
 from app.services.resource.agent.protocol_adapter.base import ProtocolAdaptedRun
 from app.engine.model.llm import LLMMessage
 from app.services.base_service import BaseService
@@ -196,6 +200,46 @@ class AgentRunPersistenceService(BaseService):
             finished_at=execution.finished_at,
         )
 
+    def build_checkpoint_read(
+        self,
+        *,
+        execution: ResourceExecution,
+        checkpoint: AgentRunCheckpoint,
+    ) -> AgentRunCheckpointRead:
+        runtime_snapshot = checkpoint.runtime_snapshot or {}
+        canonical = RuntimeCheckpointEnvelopeRead(
+            schema_version=int(runtime_snapshot.get("schema_version") or 1),
+            resource_type="agent",
+            engine="agent/react-loop",
+            checkpoint_kind=checkpoint.checkpoint_kind,
+            phase=runtime_snapshot.get("phase"),
+            reason=None,
+            run_id=execution.run_id,
+            thread_id=execution.thread_id,
+            parent_run_id=execution.parent_run_id,
+            trace_id=execution.trace_id,
+            created_at=checkpoint.created_at,
+            updated_at=checkpoint.updated_at,
+            summary=RuntimeCheckpointSummaryRead(
+                message_count=len(runtime_snapshot.get("messages") or []),
+                tool_count=len(runtime_snapshot.get("tools") or []),
+                pending_client_tool_call_count=len(checkpoint.pending_client_tool_calls or []),
+                step_count=len(runtime_snapshot.get("steps") or []),
+                next_iteration=runtime_snapshot.get("next_iteration"),
+            ),
+            state=runtime_snapshot,
+        )
+        return AgentRunCheckpointRead(
+            thread_id=checkpoint.thread_id,
+            turn_id=checkpoint.turn_id,
+            checkpoint_kind=checkpoint.checkpoint_kind,
+            runtime_snapshot=runtime_snapshot,
+            pending_client_tool_calls=checkpoint.pending_client_tool_calls or [],
+            canonical=canonical,
+            created_at=checkpoint.created_at,
+            updated_at=checkpoint.updated_at,
+        )
+
     def build_run_detail(
         self,
         *,
@@ -210,7 +254,7 @@ class AgentRunPersistenceService(BaseService):
             **summary.model_dump(),
             agent_instance_uuid=agent_instance.uuid,
             agent_name=agent_instance.name,
-            latest_checkpoint=AgentRunCheckpointRead.model_validate(checkpoint) if checkpoint else None,
+            latest_checkpoint=self.build_checkpoint_read(execution=execution, checkpoint=checkpoint) if checkpoint else None,
             events=events,
             tool_executions=tool_executions,
         )

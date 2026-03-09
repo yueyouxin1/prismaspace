@@ -71,7 +71,7 @@ async def test_websocket_disconnect_does_not_cancel_background_run(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_websocket_auto_attaches_active_run_live_events(monkeypatch):
+async def test_websocket_custom_attach_run_replays_live_events(monkeypatch):
     websocket = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(redis_service=None, vector_manager=None, arq_pool=None)),
         send_text=AsyncMock(),
@@ -88,9 +88,6 @@ async def test_websocket_auto_attaches_active_run_live_events(monkeypatch):
         def __init__(self, context):
             self.context = context
 
-        async def get_active_run(self, agent_uuid, actor, thread_id):
-            return {"run_id": "run-live-1", "thread_id": thread_id, "status": "running"}
-
         async def stream_live_run_events(self, run_id, after_seq=0):
             for payload in (
                 {"type": "RUN_STARTED", "runId": run_id},
@@ -99,18 +96,24 @@ async def test_websocket_auto_attaches_active_run_live_events(monkeypatch):
             ):
                 yield {"seq": after_seq + 1, "payload": payload}
 
-        async def async_execute(self, *args, **kwargs):
-            raise AssertionError("async_execute should not run when active run exists")
-
     monkeypatch.setattr("app.api.v1.agent.ws_handler.SessionLocal", _FakeSessionContext)
     monkeypatch.setattr("app.api.v1.agent.ws_handler.AgentService", _FakeAgentService)
     monkeypatch.setattr("app.api.v1.agent.ws_handler.AppContext", lambda **kwargs: SimpleNamespace(**kwargs))
 
     handler = AgentSessionHandler(websocket, SimpleNamespace(user=SimpleNamespace(uuid="user-1")))
     handler.auth_context = SimpleNamespace(user=SimpleNamespace(uuid="user-1"))
-
-    run_input = _build_run_input(forwarded_props={"platform": {"agentUuid": "agent-1"}})
-    await handler._run_chat_stream("agent-1", run_input)
+    await handler._dispatch(
+        json.dumps(
+            {
+                "type": "CUSTOM",
+                "name": "ps.attach_run",
+                "value": {"runId": "run-live-1", "afterSeq": 0},
+            }
+        )
+    )
+    task = handler.current_task
+    assert task is not None
+    await task
 
     payloads = [json.loads(call.args[0]) for call in websocket.send_text.await_args_list]
     assert [item["type"] for item in payloads] == [

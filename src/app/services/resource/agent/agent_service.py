@@ -82,7 +82,8 @@ from app.utils.id_generator import generate_uuid
 
 # Engine
 from app.engine.agent import (
-    AgentEngineService, AgentInput, AgentStep, AgentResult, AgentClientToolCall, AgentEngineCallbacks, BaseToolExecutor
+    AgentEngineService, AgentInput, AgentStep, AgentResult, AgentClientToolCall, AgentEngineCallbacks, BaseToolExecutor,
+    AgentRuntimeCheckpoint,
 )
 from app.engine.model.llm import (
     LLMEngineService, LLMProviderConfig, LLMRunConfig, LLMMessage, LLMTool, LLMToolCall, LLMToolCallChunk, LLMUsage, LLMEngineCallbacks
@@ -245,6 +246,21 @@ class AgentService(ResourceImplementationService):
             resume_tool_call_ids=adapted.resume_tool_call_ids,
             resume_interrupt_id=adapted.resume_interrupt_id,
         )
+
+    @staticmethod
+    def _restore_runtime_checkpoint(
+        runtime_snapshot: Optional[Dict[str, Any]],
+    ) -> Optional[AgentRuntimeCheckpoint]:
+        if not isinstance(runtime_snapshot, dict) or not runtime_snapshot:
+            return None
+        try:
+            checkpoint = AgentRuntimeCheckpoint.model_validate(runtime_snapshot)
+        except Exception:
+            logger.warning("Failed to restore runtime checkpoint from snapshot.", exc_info=True)
+            return None
+        if not checkpoint.messages:
+            return None
+        return checkpoint
 
     @staticmethod
     def _resolve_session_mode(run_input: RunAgentInputExt) -> str:
@@ -578,9 +594,7 @@ class AgentService(ResourceImplementationService):
         [Concurrency Guard] 分布式锁，防止同一个会话并发写入。
         """
         lock_key = f"lock:session:{session_uuid}"
-        # 使用 RedisService 提供的 client 获取锁
         lock = self.redis.client.lock(lock_key, timeout=60, blocking_timeout=5)
-        
         acquired = await lock.acquire()
         if not acquired:
             raise ServiceException("Session is busy. Please wait for the previous response to finish.")
