@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from httpx import AsyncClient, ASGITransport
 from fastapi import status
 from sqlalchemy_utils import database_exists, create_database, drop_database
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -94,7 +95,12 @@ async def setup_database():
     # 为确保每次测试运行都绝对干净，先删除再创建
     if database_exists(sync_db_url):
         print("\n--- Test DB found, dropping and recreating for a clean state. ---")
-        drop_database(sync_db_url)
+        try:
+            drop_database(sync_db_url)
+        except SQLAlchemyError as exc:
+            if settings.DB_TEST_NAME not in str(exc):
+                raise
+            print(f"--- Test DB drop skipped due to race/no-op: {exc} ---")
     
     print(f"\n--- Creating test database: {settings.DB_TEST_NAME} ---")
     create_database(sync_db_url)

@@ -136,3 +136,34 @@ TOOL_TEMPLATE = NodeTemplate(
         )
     ]
 )
+
+
+# ============================================================================
+# 3. Workflow Node Template
+# ============================================================================
+class WorkflowNodeConfig(ResourceNodeConfig):
+    model_config = ConfigDict(extra="forbid")
+
+
+WORKFLOW_TEMPLATE = NodeTemplate(
+    category=NodeCategory.LOGIC,
+    icon="git-branch",
+    data=NodeData(
+        registryId="WorkflowNode",
+        name="子工作流",
+        description="调用已有的 Workflow 资源并等待其完成。",
+        inputs=[],
+        outputs=[],
+        config=WorkflowNodeConfig(resource_instance_uuid=""),
+    ),
+    forms=[
+        FormProperty(
+            label="选择工作流",
+            type="form",
+            form_type="resource_selector",
+            output_key="config.resource_instance_uuid",
+            props={"resource_type": "workflow"},
+            show_expr=True,
+        )
+    ],
+)

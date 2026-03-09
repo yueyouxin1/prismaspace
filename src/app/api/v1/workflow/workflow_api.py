@@ -9,7 +9,7 @@ from app.api.dependencies.ws_auth import get_ws_auth, AuthContext
 from app.schemas.common import JsonResponse, MsgResponse
 from app.schemas.resource.workflow.workflow_schemas import (
     WorkflowNodeDefRead, WorkflowRead, WorkflowUpdate, WorkflowExecutionRequest, 
-    WorkflowExecutionResponse, WorkflowEvent
+    WorkflowExecutionResponse, WorkflowEvent, WorkflowEventRead, WorkflowRunRead, WorkflowRunSummaryRead
 )
 from app.services.resource.workflow.workflow_service import WorkflowService
 from app.services.exceptions import ServiceException
@@ -39,6 +39,40 @@ async def execute_workflow(
     """
     service = WorkflowService(context)
     result = await service.execute(uuid, request, context.actor)
+    return JsonResponse(data=result)
+
+
+@router.post("/{uuid}/async", response_model=JsonResponse[WorkflowRunSummaryRead], summary="Async Execution")
+async def execute_workflow_async(
+    uuid: str,
+    request: WorkflowExecutionRequest,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.start_background_execute(uuid, request, context.actor)
+    return JsonResponse(data=result)
+
+
+@router.post("/{uuid}/nodes/{node_id}/debug", response_model=JsonResponse[WorkflowExecutionResponse], summary="Debug Execute Node")
+async def debug_workflow_node(
+    uuid: str,
+    node_id: str,
+    request: WorkflowExecutionRequest,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.debug_node_execute(uuid, node_id, request, context.actor)
+    return JsonResponse(data=result)
+
+
+@router.get("/{uuid}/runs", response_model=JsonResponse[List[WorkflowRunSummaryRead]])
+async def list_workflow_runs(
+    uuid: str,
+    limit: int = 20,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.list_runs(uuid, limit=limit)
     return JsonResponse(data=result)
 
 @router.post("/{uuid}/sse", summary="Streaming Execution (SSE)")
@@ -102,3 +136,58 @@ async def validate_workflow(
     
     result = await service.validate_instance(instance)
     return JsonResponse(data={"is_valid": result.is_valid, "errors": result.errors})
+
+
+@router.get("/runs/{run_id}", response_model=JsonResponse[WorkflowRunRead])
+async def get_workflow_run(
+    run_id: str,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.get_run(run_id)
+    return JsonResponse(data=result)
+
+
+@router.get("/runs/{run_id}/events", response_model=JsonResponse[List[WorkflowEventRead]])
+async def list_workflow_run_events(
+    run_id: str,
+    limit: int = 1000,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.list_run_events(run_id, limit=limit)
+    return JsonResponse(data=result)
+
+
+@router.get("/runs/{run_id}/replay", summary="Replay Persisted Workflow Events")
+async def replay_workflow_run_events(
+    run_id: str,
+    limit: int = 1000,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+
+    async def sse_generator():
+        events = await service.list_run_events(run_id, limit=limit)
+        for event in events:
+            yield WorkflowEvent(event=event.event_type, data=event.payload).to_sse()
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/runs/{run_id}/cancel", response_model=JsonResponse[Dict[str, Any]])
+async def cancel_workflow_run(
+    run_id: str,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+    result = await service.cancel_run(run_id)
+    return JsonResponse(data=result)

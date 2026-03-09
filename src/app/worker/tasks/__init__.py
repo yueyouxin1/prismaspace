@@ -11,6 +11,7 @@ from .knowledge import (
     run_periodic_document_gc_task
 )
 from .agent import index_turn_task, summarize_turn_task
+from .workflow import execute_workflow_run_task
 # 2. 导入注册中心
 from ..main import TASK_FUNCTIONS, CRON_JOBS
 
@@ -25,6 +26,7 @@ TASK_FUNCTIONS.extend([
     garbage_collect_document_task,
     index_turn_task,
     summarize_turn_task,
+    execute_workflow_run_task,
 ])
 
 CRON_JOBS.extend([

@@ -17,14 +17,14 @@ from app.engine.model.llm import (
 from app.engine.schemas.parameter_schema import ParameterSchema as EngineParameterSchema
 from app.engine.utils.parameter_schema_utils import schemas2obj
 from app.engine.utils.stream import StreamBroadcaster
-from app.engine.workflow.definitions import NodeExecutionResult, NodeResultData, ParameterSchema
+from app.engine.workflow.definitions import NodeExecutionResult, NodeResultData, ParameterSchema, WorkflowInterrupt, WorkflowInterruptSignal
 from app.engine.workflow.registry import BaseNode, register_node
 from app.schemas.resource.execution_schemas import GenericExecutionRequest
 from app.services.common.llm_capability_provider import UsageAccumulator
 from app.services.exceptions import NotFoundError
 from app.utils.async_generator import AsyncGeneratorManager
 
-from .template import AGENT_TEMPLATE, LLM_TEMPLATE, TOOL_TEMPLATE
+from .template import AGENT_TEMPLATE, LLM_TEMPLATE, TOOL_TEMPLATE, WORKFLOW_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -624,3 +624,123 @@ class AppToolNode(BaseNode):
             raise RuntimeError(f"Tool execution failed: {result.error_message}")
 
         return NodeExecutionResult(input=node_input, data=NodeResultData(output=result.data))
+
+
+@register_node(template=WORKFLOW_TEMPLATE)
+class AppWorkflowNode(BaseNode):
+    async def execute(self) -> NodeExecutionResult:
+        from app.models import ResourceExecutionStatus
+        from app.services.resource.workflow.interceptors import WorkflowTraceInterceptor
+        from app.services.resource.workflow.runtime_persistence import WorkflowDurableRuntimeObserver
+        from app.services.resource.workflow.workflow_service import ExternalContext, WorkflowService
+
+        external_context = self.context.external_context
+        app_context = external_context.app_context
+        runtime_workspace = external_context.runtime_workspace
+
+        node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        workflow_uuid = getattr(self.node.data.config, "resource_instance_uuid", None)
+        if not workflow_uuid:
+            raise ValueError("Workflow UUID not configured.")
+
+        parent_run_id = getattr(external_context, "run_id", None)
+        thread_id = getattr(external_context, "thread_id", None)
+
+        workflow_service = WorkflowService(app_context)
+        child_instance = await workflow_service.get_by_uuid(workflow_uuid)
+        if child_instance is None:
+            raise NotFoundError("Child workflow not found.")
+
+        runtime_plan = workflow_service.runtime_compiler.compile(child_instance.graph)
+        child_execution = await workflow_service.execution_ledger_service.create_execution(
+            instance=child_instance,
+            actor=app_context.actor,
+            thread_id=thread_id,
+            parent_run_id=parent_run_id,
+        )
+        await app_context.db.commit()
+
+        child_external_context = ExternalContext(
+            app_context=app_context,
+            workflow_instance=child_instance,
+            runtime_workspace=runtime_workspace,
+            trace_id=getattr(external_context, "trace_id", None),
+            run_id=child_execution.run_id,
+            thread_id=child_execution.thread_id,
+            resume_payload=None,
+        )
+        runtime_observer = WorkflowDurableRuntimeObserver(
+            context=app_context,
+            execution=child_execution,
+            workflow_instance=child_instance,
+            runtime_plan=runtime_plan,
+        )
+        trace_interceptor = WorkflowTraceInterceptor(
+            db=app_context.db,
+            user_id=app_context.actor.id,
+            workflow_trace_id=getattr(external_context, "trace_id", None) or f"workflow-node-{uuid.uuid4().hex}",
+        )
+
+        try:
+            await workflow_service.execution_ledger_service.mark_running(
+                child_execution,
+                trace_id=getattr(external_context, "trace_id", None),
+            )
+            await app_context.db.commit()
+            final_result = await workflow_service.engine_service.run(
+                workflow_def=runtime_plan,
+                payload=node_input,
+                callbacks=None,
+                external_context=child_external_context,
+                interceptors=[trace_interceptor],
+                runtime_observer=runtime_observer,
+            )
+            await workflow_service.execution_ledger_service.mark_finished(
+                child_execution,
+                status=ResourceExecutionStatus.SUCCEEDED,
+            )
+            await app_context.db.commit()
+        except WorkflowInterruptSignal as interrupt_exc:
+            await workflow_service.execution_ledger_service.mark_finished(
+                child_execution,
+                status=ResourceExecutionStatus.INTERRUPTED,
+            )
+            await app_context.db.commit()
+            raise WorkflowInterruptSignal(
+                WorkflowInterrupt(
+                    node_id=self.node.id,
+                    reason=interrupt_exc.interrupt.reason,
+                    message=interrupt_exc.interrupt.message,
+                    payload={
+                        **(interrupt_exc.interrupt.payload or {}),
+                        "childRunId": child_execution.run_id,
+                        "childThreadId": child_execution.thread_id,
+                        "childWorkflowUuid": workflow_uuid,
+                    },
+                )
+            )
+        except Exception as exc:
+            await workflow_service.execution_ledger_service.mark_finished(
+                child_execution,
+                status=ResourceExecutionStatus.FAILED,
+                error_code="SUBWORKFLOW_EXECUTION_ERROR",
+                error_message=str(exc),
+            )
+            await app_context.db.commit()
+            raise RuntimeError(str(exc))
+
+        output = dict(final_result.output or {})
+        output.setdefault("__meta__", {})
+        if isinstance(output["__meta__"], dict):
+            output["__meta__"].update(
+                {
+                    "child_run_id": child_execution.run_id,
+                    "child_thread_id": child_execution.thread_id,
+                    "child_workflow_uuid": workflow_uuid,
+                }
+            )
+
+        return NodeExecutionResult(
+            input=node_input,
+            data=NodeResultData(output=output),
+        )

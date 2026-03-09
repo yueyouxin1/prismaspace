@@ -9,8 +9,49 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.conftest import UserContext
 from app.models.resource import Resource
 from app.system.resource.workflow.node_def_manager import NodeDefManager
+from app.engine.workflow import (
+    BaseNodeConfig,
+    NodeCategory,
+    NodeData,
+    NodeExecutionResult,
+    NodeResultData,
+    NodeTemplate,
+    ParameterSchema,
+    register_node,
+)
+from app.engine.workflow.registry import BaseNode
+from app.engine.utils.parameter_schema_utils import schemas2obj
 
 pytestmark = pytest.mark.asyncio
+
+
+class _DebugEchoConfig(BaseNodeConfig):
+    pass
+
+
+DEBUG_ECHO_TEMPLATE = NodeTemplate(
+    category=NodeCategory.CUSTOM,
+    icon="zap",
+    data=NodeData(
+        registryId="DebugEchoNode",
+        name="Debug Echo Node",
+        description="Echo for workflow debug tests.",
+        inputs=[ParameterSchema(name="text", type="string")],
+        outputs=[ParameterSchema(name="echo", type="string")],
+        config=_DebugEchoConfig(),
+    ),
+    forms=[],
+)
+
+
+@register_node(template=DEBUG_ECHO_TEMPLATE)
+class DebugEchoNode(BaseNode):
+    async def execute(self) -> NodeExecutionResult:
+        node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        return NodeExecutionResult(
+            input=node_input,
+            data=NodeResultData(output={"echo": f"echo:{node_input.get('text', '')}"}),
+        )
 
 
 @pytest.fixture
@@ -130,6 +171,21 @@ class TestWorkflowRuntimeApi:
         execute_data = execute_response.json()["data"]
         assert execute_data["success"] is True
         assert isinstance(execute_data["data"]["output"], dict)
+        assert isinstance(execute_data["data"]["run_id"], str)
+        assert isinstance(execute_data["data"]["thread_id"], str)
+
+        run_id = execute_data["data"]["run_id"]
+        run_response = await client.get(
+            f"/api/v1/workflow/runs/{run_id}",
+            headers=headers,
+        )
+        assert run_response.status_code == status.HTTP_200_OK, run_response.text
+        run_payload = run_response.json()["data"]
+        assert run_payload["run_id"] == run_id
+        assert run_payload["status"] == "succeeded"
+        assert run_payload["workflow_instance_uuid"] == instance_uuid
+        assert run_payload["latest_checkpoint"] is not None
+        assert len(run_payload["node_executions"]) >= 2
 
     async def test_reject_invalid_workflow_graph_with_cycle(
         self,
@@ -375,3 +431,427 @@ class TestWorkflowRuntimeApi:
         payload = validate_response.json()["data"]
         assert payload["is_valid"] is False
         assert any("missing_block" in err for err in payload["errors"])
+
+    async def test_interrupt_resume_and_run_listing(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "interrupt",
+                        "data": {
+                            "registryId": "Interrupt",
+                            "name": "Approval",
+                            "inputs": [],
+                            "outputs": [{"name": "resume", "type": "object"}],
+                            "config": {
+                                "reason": "approval_required",
+                                "message": "Please confirm the workflow run.",
+                                "resume_output_key": "resume",
+                            },
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "approval",
+                                    "type": "object",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "interrupt", "path": "resume"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "interrupt", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "interrupt", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+
+        execute_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/execute",
+            json={"inputs": {}},
+            headers=headers,
+        )
+        assert execute_response.status_code == status.HTTP_200_OK, execute_response.text
+        execute_data = execute_response.json()["data"]["data"]
+        assert execute_data["outcome"] == "interrupt"
+        assert execute_data["interrupt"]["reason"] == "approval_required"
+        run_id = execute_data["run_id"]
+
+        run_response = await client.get(
+            f"/api/v1/workflow/runs/{run_id}",
+            headers=headers,
+        )
+        assert run_response.status_code == status.HTTP_200_OK, run_response.text
+        run_payload = run_response.json()["data"]
+        assert run_payload["status"] == "interrupted"
+        assert run_payload["can_resume"] is True
+
+        resume_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/execute",
+            json={
+                "resume_from_run_id": run_id,
+                "meta": {"resume": {"resume": {"approved": True}}},
+            },
+            headers=headers,
+        )
+        assert resume_response.status_code == status.HTTP_200_OK, resume_response.text
+        resumed_data = resume_response.json()["data"]["data"]
+        assert resumed_data["outcome"] == "success"
+        assert resumed_data["output"]["approval"]["approved"] is True
+
+        runs_response = await client.get(
+            f"/api/v1/workflow/{instance_uuid}/runs",
+            headers=headers,
+        )
+        assert runs_response.status_code == status.HTTP_200_OK, runs_response.text
+        runs_payload = runs_response.json()["data"]
+        assert len(runs_payload) >= 2
+        assert runs_payload[0]["run_id"] == resumed_data["run_id"]
+
+    async def test_debug_node_execute_uses_compiled_subgraph(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "debug_echo",
+                        "data": {
+                            "registryId": "DebugEchoNode",
+                            "name": "Echo",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "echo", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "debug_echo", "path": "echo"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "debug_echo", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "debug_echo", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+
+        debug_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/nodes/debug_echo/debug",
+            json={"inputs": {"text": "hello"}},
+            headers=headers,
+        )
+        assert debug_response.status_code == status.HTTP_200_OK, debug_response.text
+        debug_payload = debug_response.json()["data"]["data"]
+        assert debug_payload["output"]["echo"] == "echo:hello"
+
+    async def test_subworkflow_node_executes_child_workflow_and_records_lineage(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+        created_resource_factory: Callable,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        parent_instance_uuid = workflow_resource.workspace_instance.uuid
+        child_resource = await created_resource_factory("workflow")
+        child_instance_uuid = child_resource.workspace_instance.uuid
+
+        child_graph = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "debug_echo",
+                        "data": {
+                            "registryId": "DebugEchoNode",
+                            "name": "Echo",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "echo", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "debug_echo", "path": "echo"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "debug_echo", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "debug_echo", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+        child_update = await client.put(
+            f"/api/v1/instances/{child_instance_uuid}",
+            json=child_graph,
+            headers=headers,
+        )
+        assert child_update.status_code == status.HTTP_200_OK, child_update.text
+
+        parent_graph = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "child_flow",
+                        "data": {
+                            "registryId": "WorkflowNode",
+                            "name": "Child Flow",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "result", "type": "string"}],
+                            "config": {"resource_instance_uuid": child_instance_uuid},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "final",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "child_flow", "path": "result"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "child_flow", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "child_flow", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+        parent_update = await client.put(
+            f"/api/v1/instances/{parent_instance_uuid}",
+            json=parent_graph,
+            headers=headers,
+        )
+        assert parent_update.status_code == status.HTTP_200_OK, parent_update.text
+
+        execute_response = await client.post(
+            f"/api/v1/workflow/{parent_instance_uuid}/execute",
+            json={"inputs": {"text": "nested"}},
+            headers=headers,
+        )
+        assert execute_response.status_code == status.HTTP_200_OK, execute_response.text
+        execute_data = execute_response.json()["data"]["data"]
+        assert execute_data["output"]["final"] == "echo:nested"
+
+        run_response = await client.get(
+            f"/api/v1/workflow/runs/{execute_data['run_id']}",
+            headers=headers,
+        )
+        assert run_response.status_code == status.HTTP_200_OK, run_response.text
+        run_payload = run_response.json()["data"]
+        child_node = next(node for node in run_payload["node_executions"] if node["node_id"] == "child_flow")
+        assert child_node["result"]["output"]["__meta__"]["child_workflow_uuid"] == child_instance_uuid
+        assert isinstance(child_node["result"]["output"]["__meta__"]["child_run_id"], str)
+
+    async def test_async_workflow_submission_enqueues_background_run(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+        arq_pool_mock,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/async",
+            json={"inputs": {"hello": "async"}},
+            headers=headers,
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+        payload = response.json()["data"]
+        assert payload["status"] == "pending"
+        assert isinstance(payload["run_id"], str)
+        assert isinstance(payload["thread_id"], str)
+        arq_pool_mock.enqueue_job.assert_awaited()
+
+    async def test_workflow_run_events_and_replay_are_queryable(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        execute_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/execute",
+            json={"inputs": {"hello": "events"}},
+            headers=headers,
+        )
+        assert execute_response.status_code == status.HTTP_200_OK, execute_response.text
+        run_id = execute_response.json()["data"]["data"]["run_id"]
+
+        events_response = await client.get(
+            f"/api/v1/workflow/runs/{run_id}/events",
+            headers=headers,
+        )
+        assert events_response.status_code == status.HTTP_200_OK, events_response.text
+        events_payload = events_response.json()["data"]
+        assert len(events_payload) >= 3
+        assert events_payload[0]["event_type"] == "start"
+        assert events_payload[-1]["event_type"] == "finish"
+
+        async with client.stream(
+            "GET",
+            f"/api/v1/workflow/runs/{run_id}/replay",
+            headers=headers,
+        ) as replay_response:
+            assert replay_response.status_code == status.HTTP_200_OK
+            body = ""
+            async for chunk in replay_response.aiter_text():
+                body += chunk
+
+        assert "event: start" in body
+        assert "event: finish" in body

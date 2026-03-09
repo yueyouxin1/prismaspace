@@ -45,6 +45,9 @@ class ExecutionLedgerService(BaseService):
         await self.db.flush()
         return execution
 
+    async def get_by_run_id(self, run_id: str) -> Optional[ResourceExecution]:
+        return await self.dao.get_by_run_id(run_id)
+
     async def resolve_parent_execution(
         self,
         *,

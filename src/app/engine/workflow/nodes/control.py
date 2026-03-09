@@ -5,8 +5,8 @@ from ...utils.parameter_schema_utils import schemas2obj
 from ...utils.data_parser import get_value_by_path, get_value_by_expr_template
 from ...utils.stream import StreamBroadcaster
 from ..registry import register_node, BaseNode, WorkflowRuntimeContext
-from ..definitions import WorkflowNode, NodeResultData, ParameterSchema, NodeExecutionResult, StreamEvent
-from .template import START_TEMPLATE, END_TEMPLATE, OUTPUT_TEMPLATE, BRANCH_TEMPLATE
+from ..definitions import WorkflowInterrupt, WorkflowInterruptSignal, WorkflowNode, NodeResultData, ParameterSchema, NodeExecutionResult, StreamEvent
+from .template import START_TEMPLATE, END_TEMPLATE, OUTPUT_TEMPLATE, BRANCH_TEMPLATE, INTERRUPT_TEMPLATE
 
 # ============================================================================
 # 1. Start Node
@@ -38,6 +38,43 @@ class OutputNode(BaseNode):
     """
     async def execute(self) -> NodeExecutionResult:
         return NodeExecutionResult(data=NodeResultData(output={}))
+
+
+@register_node(template=INTERRUPT_TEMPLATE)
+class InterruptNode(BaseNode):
+    """
+    显式中断节点。
+    首次执行抛出中断信号；resume 后将外部注入的恢复载荷写回到输出。
+    """
+
+    async def execute(self) -> NodeExecutionResult:
+        config = self.node.data.config
+        resume_key = getattr(config, "resume_output_key", "resume") or "resume"
+        external_context = self.context.external_context
+        resume_payload = getattr(external_context, "resume_payload", None) if external_context else None
+
+        if resume_payload is not None:
+            if isinstance(resume_payload, dict) and resume_key in resume_payload:
+                normalized = resume_payload[resume_key]
+            else:
+                normalized = resume_payload
+            return NodeExecutionResult(
+                data=NodeResultData(output={resume_key: normalized})
+            )
+
+        run_id = getattr(external_context, "run_id", None) if external_context else None
+        raise WorkflowInterruptSignal(
+            WorkflowInterrupt(
+                node_id=self.node.id,
+                reason=getattr(config, "reason", "user_input_required"),
+                message=getattr(config, "message", None),
+                payload={
+                    "runId": run_id,
+                    "nodeId": self.node.id,
+                    "resumeOutputKey": resume_key,
+                },
+            )
+        )
 
 # ============================================================================
 # 3. End Node (核心流式逻辑)

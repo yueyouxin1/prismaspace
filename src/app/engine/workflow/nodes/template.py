@@ -123,6 +123,8 @@ BRANCH_TEMPLATE = NodeTemplate(
 # ============================================================================
 class LoopNodeConfig(BaseNodeConfig):
     loopType: Literal["count", "list"] = Field(default="count")
+    executionMode: Literal["serial", "parallel"] = Field(default="serial")
+    maxConcurrency: int = Field(default=1, ge=1)
     loopCount: Optional[ParameterSchema] = None 
     loopList: Optional[ParameterSchema] = None
     model_config = ConfigDict(extra="forbid")
@@ -184,5 +186,80 @@ LOOP_TEMPLATE = NodeTemplate(
             required_expr="config.loopType == 'list'",
             form_role="input",
         ),
+        FormProperty(
+            label="执行模式",
+            desc="串行执行或并发批处理。",
+            type="form",
+            form_type="radio_group",
+            output_key="config.executionMode",
+            props={
+                "options": [
+                    {"label": "串行", "value": "serial"},
+                    {"label": "并行", "value": "parallel"},
+                ]
+            },
+            show_expr=True,
+            required_expr=True,
+        ),
+        FormProperty(
+            label="最大并发数",
+            desc="仅在并行模式下生效，控制单次 fan-out 并发度。",
+            type="form",
+            form_type="input_number",
+            output_key="config.maxConcurrency",
+            props={"min": 1, "step": 1},
+            show_expr="config.executionMode == 'parallel'",
+            required_expr="config.executionMode == 'parallel'",
+        ),
     ]
+)
+
+
+# ============================================================================
+# 5. Interrupt Node Template
+# ============================================================================
+class InterruptNodeConfig(BaseNodeConfig):
+    reason: str = Field(default="user_input_required")
+    message: str = Field(default="Workflow requires user input before continuing.")
+    resume_output_key: str = Field(default="resume")
+    model_config = ConfigDict(extra="forbid")
+
+
+INTERRUPT_TEMPLATE = NodeTemplate(
+    category=NodeCategory.LOGIC,
+    icon="pause-circle",
+    data=NodeData(
+        registryId="Interrupt",
+        name="人工确认",
+        description="中断工作流并等待外部输入后恢复执行。",
+        inputs=[],
+        outputs=[ParameterSchema(name="resume", type="object", required=False)],
+        config=InterruptNodeConfig(),
+    ),
+    forms=[
+        FormProperty(
+            label="中断原因",
+            type="form",
+            form_type="input",
+            output_key="config.reason",
+            show_expr=True,
+            required_expr=True,
+        ),
+        FormProperty(
+            label="提示信息",
+            type="form",
+            form_type="textarea",
+            output_key="config.message",
+            show_expr=True,
+            required_expr=True,
+        ),
+        FormProperty(
+            label="恢复输出键",
+            type="form",
+            form_type="input",
+            output_key="config.resume_output_key",
+            show_expr=True,
+            required_expr=True,
+        ),
+    ],
 )

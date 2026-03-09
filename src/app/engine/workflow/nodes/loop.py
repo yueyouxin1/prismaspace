@@ -111,6 +111,39 @@ class LoopNode(BaseNode):
         
         return synthetic_start_id, synthetic_end_id, graph_def
 
+    async def _run_single_iteration(
+        self,
+        *,
+        loop_node_id: str,
+        node_input: Dict[str, Any],
+        loop_sub_outputs_schema: List[ParameterSchema],
+        index: int,
+        item: Any,
+    ) -> Dict[str, Any]:
+        _, _, sub_graph_def = self._create_standard_sub_workflow(
+            loop_node_id,
+            self.node.data.inputs,
+            loop_sub_outputs_schema,
+            index,
+            item
+        )
+        loop_variables = {
+            "index": index,
+            "item": item,
+            **node_input
+        }
+        context_for_subflow = {
+            **self.context.variables,
+            loop_node_id: loop_variables
+        }
+        sub_executor = self.context.create_sub_workflow_executor(
+            workflow_data=sub_graph_def,
+            parent_variables=context_for_subflow,
+            payload=self.context.payload
+        )
+        iteration_result_raw = await sub_executor.execute()
+        return iteration_result_raw.output
+
     async def execute(self) -> NodeExecutionResult:
         # 1. 解析基础配置
         loop_node_id = self.node.id
@@ -145,7 +178,12 @@ class LoopNode(BaseNode):
             is_inner_output = False
             if schema.value and schema.value.type == 'ref':
                 content = schema.value.content
-                if isinstance(content, dict) and content.get('source') == 'loop-block-output':
+                source = None
+                if isinstance(content, dict):
+                    source = content.get('source')
+                else:
+                    source = getattr(content, 'source', None)
+                if source == 'loop-block-output':
                     is_inner_output = True
             
             if is_inner_output:
@@ -175,49 +213,38 @@ class LoopNode(BaseNode):
 
         all_iterations_results = []
 
-        # 3. 串行执行迭代
-        for index, item in enumerate(loop_data):
-            # A. 构建子图
-            start_id, end_id, sub_graph_def = self._create_standard_sub_workflow(
-                loop_node_id,
-                self.node.data.inputs,
-                loop_sub_outputs_schema,
-                index,
-                item
-            )
+        execution_mode = getattr(self.node.data.config, "executionMode", "serial") or "serial"
+        max_concurrency = max(1, int(getattr(self.node.data.config, "maxConcurrency", 1) or 1))
 
-            # B. 准备子流程上下文
-            # 注入循环变量 (index, item) 以及 Loop 节点的 inputs
-            loop_variables = {
-                "index": index,
-                "item": item,
-                **node_input
-            }
-            
-            # 这里的 context key 必须是 loop_node_id
-            # 这样子流程中的节点引用 {{LoopNodeID.item}} 才能解析正确
-            context_for_subflow = {
-                **self.context.variables,
-                loop_node_id: loop_variables
-            }
+        # 3. 串行/并行执行迭代
+        if execution_mode == "parallel" and len(loop_data) > 1 and max_concurrency > 1:
+            semaphore = asyncio.Semaphore(max_concurrency)
 
-            # C. 创建子执行器并运行
-            # 使用 self.context.create_sub_workflow_executor (IoC)
-            sub_executor = self.context.create_sub_workflow_executor(
-                workflow_data=sub_graph_def,
-                parent_variables=context_for_subflow,
-                payload=self.context.payload
-            )
-            
-            # 执行子工作流
-            # 这里调用的是 sub_executor.execute()，它是 Orchestrator 的方法
-            # 它会返回 End 节点的 result
+            async def _guarded(index: int, item: Any) -> Tuple[int, Dict[str, Any]]:
+                async with semaphore:
+                    result = await self._run_single_iteration(
+                        loop_node_id=loop_node_id,
+                        node_input=node_input,
+                        loop_sub_outputs_schema=loop_sub_outputs_schema,
+                        index=index,
+                        item=item,
+                    )
+                    return index, result
 
-            iteration_result_raw = await sub_executor.execute()
-
-            iteration_data = iteration_result_raw.output
-            
-            all_iterations_results.append(iteration_data)
+            tasks = [_guarded(index, item) for index, item in enumerate(loop_data)]
+            indexed_results = await asyncio.gather(*tasks)
+            indexed_results.sort(key=lambda pair: pair[0])
+            all_iterations_results = [result for _, result in indexed_results]
+        else:
+            for index, item in enumerate(loop_data):
+                iteration_data = await self._run_single_iteration(
+                    loop_node_id=loop_node_id,
+                    node_input=node_input,
+                    loop_sub_outputs_schema=loop_sub_outputs_schema,
+                    index=index,
+                    item=item,
+                )
+                all_iterations_results.append(iteration_data)
 
         # 4. 聚合结果
         # 使用 merge_dicts_vanilla 将 list of dicts 转换为 dict of lists

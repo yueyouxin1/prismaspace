@@ -10,7 +10,7 @@ from ..schemas.form_schema import FormProperty
 # 1. 权威状态定义 (Authoritative Status Definitions)
 # ============================================================================
 
-NodeStatus = Literal["PENDING", "RUNNING", "COMPLETED", "SKIPPED", "STREAMTASK", "STREAMSTART", "STREAMING", "STREAMEND", "FAILED"]
+NodeStatus = Literal["PENDING", "RUNNING", "COMPLETED", "SKIPPED", "STREAMTASK", "STREAMSTART", "STREAMING", "STREAMEND", "FAILED", "INTERRUPTED"]
 
 class StreamEvent(BaseModel):
     node_id: str
@@ -45,6 +45,19 @@ class NodeExecutionResult(BaseModel):
     input: Dict[str, Any] = Field(default_factory=dict, description="最终运行时输入")
     data: Union[NodeResultData, Any] 
     activated_port: str = "0"
+
+
+class WorkflowInterrupt(BaseModel):
+    node_id: str
+    reason: str = "user_input_required"
+    message: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowInterruptSignal(Exception):
+    def __init__(self, interrupt: WorkflowInterrupt):
+        super().__init__(interrupt.message or interrupt.reason)
+        self.interrupt = interrupt
     
 # ============================================================================
 # 2. 策略与控制流定义 (Policy & Control Flow)

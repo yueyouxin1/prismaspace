@@ -1,9 +1,10 @@
-from typing import Dict, Any, Type, Optional, List
+from typing import Dict, Any, Optional, List
 
 from .definitions import WorkflowGraphDef, NodeResultData
-from .orchestrator import WorkflowCallbacks, WorkflowOrchestrator
-from .registry import default_node_registry, NodeExecutor
+from .orchestrator import WorkflowCallbacks, WorkflowOrchestrator, WorkflowRuntimeObserver
 from .interceptor import NodeExecutionInterceptor
+from .context import WorkflowRuntimeSnapshot
+from .runtime_ir import WorkflowRuntimeCompiler, WorkflowRuntimePlan
 from . import nodes # 导入这些模块以触发 @register_node 装饰器自动注册
 
 class WorkflowEngineService:
@@ -14,11 +15,13 @@ class WorkflowEngineService:
 
     async def run(
         self, 
-        workflow_def: Dict[str, Any], 
+        workflow_def: Dict[str, Any] | WorkflowRuntimePlan, 
         payload: Dict[str, Any] = None,
         callbacks: WorkflowCallbacks = None,
         external_context: Any = None,
-        interceptors: Optional[List[NodeExecutionInterceptor]] = None
+        interceptors: Optional[List[NodeExecutionInterceptor]] = None,
+        restored_snapshot: Optional[WorkflowRuntimeSnapshot] = None,
+        runtime_observer: Optional[WorkflowRuntimeObserver] = None,
     ) -> NodeResultData:
         """
         执行工作流。
@@ -29,18 +32,24 @@ class WorkflowEngineService:
         """
         # 1. 解析并校验图结构
         try:
-            graph_def = WorkflowGraphDef.model_validate(workflow_def)
+            runtime_plan = (
+                workflow_def
+                if isinstance(workflow_def, WorkflowRuntimePlan)
+                else WorkflowRuntimeCompiler().compile(workflow_def)
+            )
         except Exception as e:
             raise ValueError(f"Invalid workflow definition: {e}")
 
         # 2. 创建调度器
         # Orchestrator 是纯粹的逻辑核心，每次执行都是独立的
         orchestrator = WorkflowOrchestrator(
-            workflow_def=graph_def,
+            workflow_plan=runtime_plan,
             payload=payload or {},
             callbacks=callbacks,
             external_context=external_context,
             interceptors=interceptors or [],
+            restored_snapshot=restored_snapshot,
+            runtime_observer=runtime_observer,
         )
 
         # 3. 启动执行

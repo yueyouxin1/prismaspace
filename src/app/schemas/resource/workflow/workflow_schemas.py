@@ -1,13 +1,21 @@
 # src/app/schemas/resource/workflow/workflow_schemas.py
 
+from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
 from app.engine.workflow import (
-    NodeResultData, NodeState, StreamEvent, ParameterSchema
+    NodeResultData, ParameterSchema
 )
 from app.schemas.common import SSEvent, ExecutionRequest, ExecutionResponse
-from app.models.resource.workflow import Workflow, WorkflowNodeDef
+from app.models.resource.workflow import (
+    Workflow,
+    WorkflowCheckpointReason,
+    WorkflowExecutionCheckpoint,
+    WorkflowExecutionEvent,
+    WorkflowNodeDef,
+    WorkflowNodeExecution,
+)
 from app.schemas.project.project_schemas import CreatorInfo
 
 class WorkflowSchema(BaseModel):
@@ -98,12 +106,139 @@ class WorkflowEvent(SSEvent):
     """Workflow 运行时产生的原子事件"""
     pass
 
+
+class WorkflowEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    sequence_no: int
+    event_type: str
+    payload: Dict[str, Any]
+    created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_event(cls, data: Any) -> Any:
+        if isinstance(data, WorkflowExecutionEvent):
+            event_type = data.event_type.value if hasattr(data.event_type, "value") else str(data.event_type)
+            return {
+                "sequence_no": data.sequence_no,
+                "event_type": event_type,
+                "payload": data.payload or {},
+                "created_at": data.created_at,
+            }
+        return data
+
 class WorkflowExecutionRequest(ExecutionRequest):
-    # 继承 generic inputs
-    pass
+    thread_id: Optional[str] = Field(default=None, description="逻辑执行线程 ID。")
+    parent_run_id: Optional[str] = Field(default=None, description="上游运行 ID，用于 retry/regenerate 谱系。")
+    resume_from_run_id: Optional[str] = Field(default=None, description="从指定 run_id 的最新 checkpoint 恢复。")
+
+
+class WorkflowInterruptRead(BaseModel):
+    id: Optional[str] = None
+    node_id: str
+    reason: str
+    message: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
 
 class WorkflowExecutionResponseData(NodeResultData):
     trace_id: Optional[str] = Field(None)
+    run_id: Optional[str] = Field(None)
+    thread_id: Optional[str] = Field(None)
+    outcome: Optional[Literal["success", "interrupt", "cancelled"]] = None
+    interrupt: Optional[WorkflowInterruptRead] = None
 
 class WorkflowExecutionResponse(ExecutionResponse):
     data: WorkflowExecutionResponseData
+
+
+class WorkflowRunNodeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    node_id: str
+    node_name: str
+    node_type: str
+    attempt: int
+    status: str
+    input: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    activated_port: Optional[str] = None
+    executed_time: float = 0.0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_node_execution(cls, data: Any) -> Any:
+        if isinstance(data, WorkflowNodeExecution):
+            return {
+                "node_id": data.node_id,
+                "node_name": data.node_name,
+                "node_type": data.node_type,
+                "attempt": data.attempt,
+                "status": data.status,
+                "input": data.input,
+                "result": data.result,
+                "error_message": data.error_message,
+                "activated_port": data.activated_port,
+                "executed_time": data.executed_time,
+                "started_at": data.started_at,
+                "finished_at": data.finished_at,
+            }
+        return data
+
+
+class WorkflowCheckpointRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    step_index: int
+    reason: str
+    node_id: Optional[str] = None
+    created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_checkpoint(cls, data: Any) -> Any:
+        if isinstance(data, WorkflowExecutionCheckpoint):
+            reason = data.reason.value if hasattr(data.reason, "value") else str(data.reason)
+            return {
+                "id": data.id,
+                "step_index": data.step_index,
+                "reason": reason,
+                "node_id": data.node_id,
+                "created_at": data.created_at,
+            }
+        return data
+
+
+class WorkflowRunRead(BaseModel):
+    run_id: str
+    thread_id: str
+    parent_run_id: Optional[str] = None
+    status: str
+    trace_id: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    workflow_instance_uuid: str
+    workflow_name: str
+    latest_checkpoint: Optional[WorkflowCheckpointRead] = None
+    node_executions: List[WorkflowRunNodeRead] = Field(default_factory=list)
+    can_resume: bool = False
+
+
+class WorkflowRunSummaryRead(BaseModel):
+    run_id: str
+    thread_id: str
+    parent_run_id: Optional[str] = None
+    status: str
+    trace_id: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    latest_checkpoint: Optional[WorkflowCheckpointRead] = None
