@@ -6,7 +6,7 @@ import json
 from typing import Any, List, Optional
 
 from .base import (
-    AgentInput, AgentResult, AgentStep, AgentClientToolCall, AgentEngineCallbacks,
+    AgentInput, AgentResult, AgentRuntimeCheckpoint, AgentStep, AgentClientToolCall, AgentEngineCallbacks,
     BaseToolExecutor, ToolExecutionInterrupt
 )
 from ..model.llm import (
@@ -76,6 +76,15 @@ class AgentEngineService:
             # --- 步骤 2: 启动 ReAct 循环 ---
             for _ in range(self.max_iterations):
                 round_reasoning_chunks: List[str] = []
+                if callbacks:
+                    await callbacks.on_checkpoint_snapshot(
+                        AgentRuntimeCheckpoint(
+                            phase="before_llm",
+                            messages=[msg.model_copy(deep=True) for msg in message_history],
+                            tools=list(run_config.tools or []),
+                            pending_client_tool_calls=[],
+                        )
+                    )
 
                 # --- 内部 LLM 回调处理器 ---
                 # 这个回调类现在只负责"透传"流式状态给上层 UI，不再负责控制流逻辑
@@ -223,6 +232,15 @@ class AgentEngineService:
                         ))
 
                     if client_tool_calls:
+                        if callbacks:
+                            await callbacks.on_checkpoint_snapshot(
+                                AgentRuntimeCheckpoint(
+                                    phase="interrupt",
+                                    messages=[msg.model_copy(deep=True) for msg in message_history],
+                                    tools=list(run_config.tools or []),
+                                    pending_client_tool_calls=client_tool_calls,
+                                )
+                            )
                         interrupt_result = AgentResult(
                             message=assistant_msg,
                             steps=intermediate_steps,
@@ -236,6 +254,15 @@ class AgentEngineService:
                         return interrupt_result
                     
                     # 完成工具调用后，continue 进入下一轮循环，将工具结果发回给 LLM
+                    if callbacks:
+                        await callbacks.on_checkpoint_snapshot(
+                            AgentRuntimeCheckpoint(
+                                phase="after_tools",
+                                messages=[msg.model_copy(deep=True) for msg in message_history],
+                                tools=list(run_config.tools or []),
+                                pending_client_tool_calls=[],
+                            )
+                        )
                     continue 
                 
                 else: 

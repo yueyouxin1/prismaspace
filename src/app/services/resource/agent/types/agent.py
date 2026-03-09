@@ -1,6 +1,7 @@
 # src/app/services/resource/agent/types/agent.py
 
 from dataclasses import dataclass
+from asyncio import Task
 from typing import Any, Callable, Optional
 
 from app.schemas.resource.agent.agent_schemas import AgentConfig
@@ -29,6 +30,7 @@ class AgentRunResult:
     trace_id: Optional[str]
     thread_id: str
     cancel: Optional[Callable[[], None]] = None
+    task: Optional[Task[Any]] = None
 
 
 @dataclass

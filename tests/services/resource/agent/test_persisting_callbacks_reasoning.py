@@ -1,6 +1,8 @@
+import asyncio
 import pytest
 
 from app.engine.agent import AgentResult, AgentClientToolCall, AgentStep
+from app.engine.agent.base import AgentRuntimeCheckpoint
 from app.engine.model.llm import LLMMessage, LLMToolCall, LLMToolCallChunk, LLMUsage
 from app.schemas.protocol import RunAgentInputExt
 from app.services.common.llm_capability_provider import UsageAccumulator
@@ -495,3 +497,90 @@ async def test_finish_emits_message_level_reasoning_encrypted_event():
     ]
     assert payloads[0]["subtype"] == "message"
     assert payloads[0]["entityId"] == "assistant-msg-1"
+
+
+@pytest.mark.asyncio
+async def test_callbacks_capture_events_and_tool_history():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_id="run-1",
+        run_input=_build_run_input(),
+    )
+
+    tool_call = LLMToolCall(
+        id="call-1",
+        type="function",
+        function={"name": "fetch_weather", "arguments": "{\"city\":\"shanghai\"}"},
+    )
+
+    await callbacks.on_agent_start()
+    await callbacks.on_tool_calls_generated([tool_call])
+    await callbacks.on_agent_step(
+        AgentStep(
+            thought="need tool",
+            action=tool_call,
+            observation={"temperature": 26},
+        )
+    )
+
+    captured_events = callbacks.get_captured_events()
+    tool_history = callbacks.get_tool_history()
+
+    assert captured_events[0]["event_type"] == "RUN_STARTED"
+    assert any(item["event_type"] == "TOOL_CALL_RESULT" for item in captured_events)
+    assert tool_history[0]["tool_call_id"] == "call-1"
+    assert tool_history[0]["status"] == "completed"
+    assert tool_history[0]["result"] == {"temperature": 26}
+
+
+@pytest.mark.asyncio
+async def test_callbacks_cancel_checker_aborts_event_emission():
+    generator = AsyncGeneratorManager()
+
+    async def _should_cancel():
+        return True
+
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_id="run-1",
+        run_input=_build_run_input(),
+        cancel_checker=_should_cancel,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await callbacks.on_final_chunk_generated("hello")
+
+
+@pytest.mark.asyncio
+async def test_callbacks_capture_engine_level_runtime_checkpoint_snapshot():
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=AsyncGeneratorManager(),
+        session_manager=None,
+        trace_id="trace-1",
+        run_id="run-1",
+        run_input=_build_run_input(),
+    )
+
+    await callbacks.on_checkpoint_snapshot(
+        AgentRuntimeCheckpoint(
+            phase="interrupt",
+            messages=[LLMMessage(role="user", content="hello"), LLMMessage(role="assistant", tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "ask", "arguments": "{}"}}])],
+            tools=[],
+            pending_client_tool_calls=[
+                AgentClientToolCall(tool_call_id="call-1", name="ask", arguments={"x": 1})
+            ],
+        )
+    )
+
+    snapshot = callbacks.get_runtime_checkpoint_snapshot()
+    assert snapshot["phase"] == "interrupt"
+    assert snapshot["messages"][0]["content"] == "hello"
+    assert snapshot["pending_client_tool_calls"][0]["tool_call_id"] == "call-1"

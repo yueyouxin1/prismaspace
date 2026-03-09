@@ -35,7 +35,8 @@ from app.dao.workspace.workspace_dao import WorkspaceDao
 # Schemas
 from app.schemas.resource.agent.agent_schemas import (
     AgentUpdate, AgentRead, AgentConfig, GenerationDiversity, AgentRAGConfig, ModelParams,
-    InputOutputConfig, DeepMemoryConfig, AgentExecutionRequest, AgentExecutionResponse
+    InputOutputConfig, DeepMemoryConfig, AgentExecutionRequest, AgentExecutionResponse,
+    AgentRunDetailRead, AgentRunEventRead, AgentRunSummaryRead, AgentToolExecutionRead,
 )
 from app.schemas.protocol import (
     AgUiInterrupt,
@@ -66,6 +67,12 @@ from app.services.resource.agent.persisting_callbacks import PersistingAgentCall
 from app.services.resource.agent.processors import ResourceAwareToolExecutor, ShortContextProcessor
 from app.services.resource.agent.protocol_adapter import AgUiProtocolAdapter, ProtocolAdapterRegistry
 from app.services.resource.agent.protocol_adapter.base import ProtocolAdaptedRun
+from app.services.resource.agent.live_events import AgentLiveEventService
+from app.services.resource.agent.run_control import AgentRunControlService, AgentRunRegistry
+from app.services.resource.agent.run_persistence import AgentRunPersistenceService
+from app.services.resource.agent.run_preparation import AgentRunPreparationService
+from app.services.resource.agent.run_execution import AgentRunExecutionService
+from app.services.resource.agent.run_query import AgentRunQueryService
 from app.schemas.resource.execution_schemas import AnyExecutionRequest, AnyExecutionResponse
 from app.services.exceptions import ServiceException, NotFoundError, ConfigurationError, PermissionDeniedError
 from app.services.product.types.feature import FeatureRole
@@ -106,9 +113,52 @@ class AgentService(ResourceImplementationService):
         self.prompt_template = PromptTemplate()
         self.protocol_adapters = ProtocolAdapterRegistry()
         self.execution_ledger_service = ExecutionLedgerService(context)
+        self.live_event_service = AgentLiveEventService(context)
+        self.run_control_service = AgentRunControlService(context)
+        self.run_persistence_service = AgentRunPersistenceService(context)
         self.protocol_adapters.register("ag-ui", AgUiProtocolAdapter())
         self.resource_resolver = BaseResourceService(context)
         self._db_session_factory = context.db_session_factory or SessionLocal
+
+    def _preparation_service(self) -> AgentRunPreparationService:
+        return AgentRunPreparationService(self)
+
+    def _execution_service(self) -> AgentRunExecutionService:
+        return AgentRunExecutionService(self)
+
+    def _query_service(self) -> AgentRunQueryService:
+        return AgentRunQueryService(self)
+
+    @staticmethod
+    def _parse_agent_config(instance: Agent) -> AgentConfig:
+        return AgentConfig(**instance.agent_config)
+
+    def _build_pipeline_manager(
+        self,
+        *,
+        rendered_system_prompt: str,
+        user_message: LLMMessage,
+        history_messages: List[LLMMessage],
+        tool_executor,
+        agent_config: AgentConfig,
+        dependencies: List[ResourceRef],
+        runtime_workspace: Workspace,
+        session_manager,
+        prompt_variables: Dict[str, Any],
+    ) -> AgentPipelineManager:
+        return AgentPipelineManager(
+            system_message=LLMMessage(role="system", content=rendered_system_prompt),
+            user_message=user_message,
+            history=history_messages,
+            tool_executor=tool_executor,
+        ).add_standard_processors(
+            app_context=self.context,
+            agent_config=agent_config,
+            dependencies=dependencies,
+            runtime_workspace=runtime_workspace,
+            session_manager=session_manager,
+            prompt_variables=prompt_variables,
+        )
 
     # ==========================================================================
     # Execution Logic (The Core)
@@ -163,6 +213,38 @@ class AgentService(ResourceImplementationService):
     @staticmethod
     def build_interrupt_id(run_id: str) -> str:
         return run_id
+
+    @staticmethod
+    def _restore_adapted_from_checkpoint(
+        adapted: ProtocolAdaptedRun,
+        checkpoint: Optional[Any],
+    ) -> ProtocolAdaptedRun:
+        if checkpoint is None or not isinstance(getattr(checkpoint, "adapted_snapshot", None), dict):
+            return adapted
+
+        snapshot = checkpoint.adapted_snapshot
+        custom_history = adapted.custom_history
+        if not custom_history:
+            custom_history = [
+                item if isinstance(item, LLMMessage) else LLMMessage.model_validate(item)
+                for item in (snapshot.get("custom_history") or [])
+            ]
+        resume_messages = adapted.resume_messages or [
+            item if isinstance(item, LLMMessage) else LLMMessage.model_validate(item)
+            for item in (snapshot.get("resume_messages") or [])
+        ]
+        has_custom_history = adapted.has_custom_history or bool(snapshot.get("has_custom_history"))
+
+        return ProtocolAdaptedRun(
+            input_content=adapted.input_content,
+            thread_id=adapted.thread_id,
+            client_tools=adapted.client_tools,
+            custom_history=custom_history,
+            resume_messages=resume_messages,
+            has_custom_history=has_custom_history,
+            resume_tool_call_ids=adapted.resume_tool_call_ids,
+            resume_interrupt_id=adapted.resume_interrupt_id,
+        )
 
     @staticmethod
     def _resolve_session_mode(run_input: RunAgentInputExt) -> str:
@@ -483,178 +565,12 @@ class AgentService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None,
     ) -> PreparedAgentRun:
-        instance = await self.get_by_uuid(instance_uuid)
-        if not instance:
-            raise NotFoundError("Agent not found")
-        await self._check_execute_perm(instance)
-
-        workspace = await self._resolve_runtime_workspace(
-            instance=instance,
+        return await self._preparation_service().prepare_async_run(
+            instance_uuid=instance_uuid,
+            run_input=run_input,
+            actor=actor,
             runtime_workspace=runtime_workspace,
         )
-
-        try:
-            agent_config = AgentConfig(**instance.agent_config)
-        except Exception as exc:
-            raise ConfigurationError(f"Agent {instance.uuid} config invalid: {exc}")
-
-        protocol_name = self._resolve_protocol_name(run_input)
-        adapter = self.protocol_adapters.get(protocol_name)
-        if adapter is None:
-            raise ServiceException(f"Unsupported protocol '{protocol_name}'.")
-
-        tool_executor = ResourceAwareToolExecutor(self.context, workspace)
-        adapted = adapter.adapt(run_input, tool_registrar=tool_executor)
-        if not adapted.input_content and not adapted.custom_history and not adapted.resume_messages:
-            raise ServiceException("Agent input content is required.")
-
-        generator_manager = AsyncGeneratorManager()
-        dependencies = await self.ref_dao.get_dependencies(instance.id)
-
-        trace_id = str(uuid.uuid4())
-        requested_thread_id = self._normalize_thread_id(adapted.thread_id)
-        if not requested_thread_id:
-            raise ServiceException("Agent threadId is required.")
-        session_thread_id = self._normalize_uuid(requested_thread_id)
-        session_mode = self._resolve_session_mode(run_input)
-        requires_session_binding = self._requires_persistent_session_binding(
-            run_input,
-            requested_thread_id=requested_thread_id,
-        )
-        parent_run_id = self._normalize_parent_run_id(run_input.parent_run_id)
-        resume_interrupt_id = self._normalize_interrupt_id(adapted.resume_interrupt_id)
-        if resume_interrupt_id and not parent_run_id:
-            parent_run_id = resume_interrupt_id
-
-        parent_execution = None
-        turn_id: Optional[str] = None
-        if parent_run_id:
-            parent_execution = await self.execution_ledger_service.resolve_parent_execution(
-                parent_run_id=parent_run_id,
-                instance=instance,
-                actor=actor,
-                thread_id=requested_thread_id,
-            )
-            if parent_execution is None:
-                parent_run_id = None
-            else:
-                turn_id = await self.execution_ledger_service.resolve_lineage_root_run_id(
-                    execution=parent_execution,
-                    instance=instance,
-                    actor=actor,
-                    thread_id=requested_thread_id,
-                )
-                if not turn_id:
-                    parent_execution = None
-                    parent_run_id = None
-
-        if resume_interrupt_id:
-            if parent_execution is None:
-                raise ServiceException("resume interruptId is invalid for the current session/thread.")
-            if parent_execution.status != ResourceExecutionStatus.INTERRUPTED:
-                raise ServiceException("resume interruptId must reference an interrupted run.")
-            if resume_interrupt_id != parent_execution.run_id:
-                raise ServiceException("resume interruptId does not match the parent run.")
-
-        execution: Optional[ResourceExecution] = None
-        try:
-            execution = await self.execution_ledger_service.create_execution(
-                instance=instance,
-                actor=actor,
-                thread_id=requested_thread_id,
-                parent_run_id=parent_run_id,
-            )
-            await self.db.commit()
-
-            turn_id = turn_id or execution.run_id
-            canonical_run_input = run_input.model_copy(
-                update={
-                    "run_id": execution.run_id,
-                    "thread_id": requested_thread_id,
-                    "parent_run_id": parent_run_id,
-                }
-            )
-            message_ids = self._build_stream_message_ids()
-
-            session_manager: Optional[AgentSessionManager] = None
-            if session_thread_id and session_mode != "stateless":
-                candidate = AgentSessionManager(
-                    self.context,
-                    session_thread_id,
-                    execution.run_id,
-                    turn_id,
-                    trace_id,
-                    instance,
-                    workspace,
-                    actor,
-                    create_if_missing=False,
-                )
-                try:
-                    await candidate.initialize()
-                    session_manager = candidate
-                except (NotFoundError, PermissionDeniedError, ServiceException) as exc:
-                    logger.info("Ignoring invalid session-backed thread '%s': %s", session_thread_id, exc)
-
-            if session_manager is None and not adapted.has_custom_history and requires_session_binding:
-                error_message = (
-                    "A valid threadId (platform session UUID) is required when custom messages history is not provided."
-                )
-                await self.execution_ledger_service.mark_finished(
-                    execution,
-                    status=ResourceExecutionStatus.FAILED,
-                    error_code="AGENT_SESSION_REQUIRED",
-                    error_message=error_message,
-                )
-                await self.db.commit()
-                raise ServiceException(error_message)
-
-            trace_manager = TraceManager(
-                db=self.db,
-                operation_name="agent.run",
-                user_id=actor.id,
-                force_trace_id=trace_id,
-                target_instance_id=instance.id,
-                attributes=None
-            )
-
-            return PreparedAgentRun(
-                result=AgentRunResult(
-                    generator=generator_manager,
-                    config=agent_config,
-                    run_id=execution.run_id,
-                    turn_id=turn_id,
-                    trace_id=trace_id,
-                    thread_id=requested_thread_id,
-                ),
-                background_task_kwargs={
-                    "agent_config": agent_config,
-                    "llm_module_version": instance.llm_module_version,
-                    "runtime_workspace": workspace,
-                    "trace_manager": trace_manager,
-                    "generator_manager": generator_manager,
-                    "execution": execution,
-                    "turn_id": turn_id,
-                    "session_manager": session_manager,
-                    "run_input": canonical_run_input,
-                    "message_ids": message_ids,
-                    "dependencies": dependencies,
-                    "adapted": adapted,
-                    "tool_executor": tool_executor,
-                    "agent_instance": instance,
-                },
-            )
-        except Exception as exc:
-            await generator_manager.aclose(force=True)
-            await self.db.rollback()
-            if execution is not None:
-                await self.execution_ledger_service.mark_finished(
-                    execution,
-                    status=ResourceExecutionStatus.FAILED,
-                    error_code="AGENT_RUN_INIT_ERROR",
-                    error_message=str(exc),
-                )
-                await self.db.commit()
-            raise
 
     @asynccontextmanager
     async def _session_lock(self, session_uuid: str):
@@ -694,191 +610,131 @@ class AgentService(ResourceImplementationService):
         tool_executor: Optional[ResourceAwareToolExecutor] = None,
         agent_instance: Optional[Agent] = None,
     ):
+        await self._execution_service().run_background_task(
+            agent_config=agent_config,
+            llm_module_version=llm_module_version,
+            runtime_workspace=runtime_workspace,
+            trace_manager=trace_manager,
+            generator_manager=generator_manager,
+            execution=execution,
+            turn_id=turn_id,
+            session_manager=session_manager,
+            run_input=run_input,
+            message_ids=message_ids,
+            dependencies=dependencies,
+            adapted=adapted,
+            tool_executor=tool_executor,
+            agent_instance=agent_instance,
+        )
 
-        callbacks: Optional[PersistingAgentCallbacks] = None
-        usage_accumulator = UsageAccumulator()
-        final_result: Optional[AgentResult] = None
-        pending_post_commit_dispatch = False
+    async def _should_cancel_run(self, run_id: str) -> bool:
+        control = getattr(self, "run_control_service", None)
+        if control is None:
+            return False
+        return await control.should_cancel(run_id)
+
+    async def _clear_cancel_run(self, run_id: str) -> None:
+        control = getattr(self, "run_control_service", None)
+        if control is None:
+            return None
+        await control.clear_cancel(run_id)
+
+    async def _persist_agent_run_artifacts(
+        self,
+        *,
+        execution: ResourceExecution,
+        agent_instance: Optional[Agent],
+        session: Optional[Any],
+        turn_id: Optional[str],
+        callbacks: Optional[PersistingAgentCallbacks],
+    ) -> None:
+        persistence = getattr(self, "run_persistence_service", None)
+        if callbacks is None or agent_instance is None or persistence is None:
+            return
         try:
-            async with self.ai_provider:
-                callbacks = PersistingAgentCallbacks(
-                    generator_manager=generator_manager,
-                    session_manager=session_manager,
-                    trace_id=trace_manager.force_trace_id,
-                    run_id=execution.run_id,
-                    turn_id=turn_id,
-                    usage_accumulator=usage_accumulator,
-                    run_input=run_input,
-                    message_ids=message_ids,
-                    interrupt_id_builder=self.build_interrupt_id,
-                )
-
-                if adapted is None or tool_executor is None or agent_instance is None:
-                    raise ServiceException("Agent background task missing runtime prerequisites.")
-
-                session = session_manager.session if session_manager and session_manager.session else None
-                lock_ctx = self._session_lock(session.uuid) if session else nullcontext()
-
-                async with lock_ctx:
-                    if session:
-                        await self.db.refresh(session)
-                        preload_turns = ShortContextProcessor.compute_fetch_limit(
-                            total_turns=session.turn_count,
-                            max_turns=agent_config.io_config.history_turns,
-                        )
-                        if session.turn_count > 0:
-                            await session_manager.preload_recent_messages(max(1, preload_turns))
-                        await self._enforce_pending_tool_results(
-                            session_manager=session_manager,
-                            resume_tool_call_ids=adapted.resume_tool_call_ids,
-                        )
-                        if adapted.resume_messages:
-                            self._buffer_protocol_history_messages(
-                                session_manager=session_manager,
-                                history=adapted.resume_messages,
-                            )
-
-                    prompt_variables = await self.agent_memory_var_service.get_runtime_object(
-                        agent_instance.version_id,
-                        self.context.actor.id,
-                        session.uuid if session else None,
-                    )
-                    rendered_system_prompt = self.prompt_template.render(
-                        agent_instance.system_prompt,
-                        prompt_variables,
-                    )
-                    history_messages = [*adapted.custom_history, *adapted.resume_messages]
-                    user_message = LLMMessage(role="user", content=adapted.input_content)
-
-                    pipeline_manager = AgentPipelineManager(
-                        system_message=LLMMessage(role="system", content=rendered_system_prompt),
-                        user_message=user_message,
-                        history=history_messages,
-                        tool_executor=tool_executor,
-                    ).add_standard_processors(
-                        app_context=self.context,
-                        agent_config=agent_config,
-                        dependencies=dependencies or [],
-                        runtime_workspace=runtime_workspace,
-                        session_manager=session_manager,
-                        prompt_variables=prompt_variables,
-                    )
-
-                    final_messages = await pipeline_manager.build_context()
-                    final_tools = await pipeline_manager.build_skill()
-
-                    module_context = await self.module_service.get_runtime_context(
-                        version_id=llm_module_version.id,
-                        actor=self.context.actor,
-                        workspace=runtime_workspace
-                    )
-                    model_context_window = self._resolve_model_context_window(module_context.version.attributes)
-
-                    run_config = LLMRunConfig(
-                        model=module_context.version.name,
-                        temperature=agent_config.model_params.temperature,
-                        top_p=agent_config.model_params.top_p,
-                        presence_penalty=agent_config.model_params.presence_penalty,
-                        frequency_penalty=agent_config.model_params.frequency_penalty,
-                        max_context_window=model_context_window,
-                        max_tokens=agent_config.io_config.max_response_tokens,
-                        enable_thinking=agent_config.io_config.enable_deep_thinking,
-                        thinking_budget=agent_config.io_config.max_thinking_tokens,
-                        tools=final_tools,
-                        stream=True
-                    )
-
-                    if session:
-                        session_manager.buffer_message(
-                            role=AgentMessageRole.USER,
-                            message_uuid=message_ids.user_message_id if message_ids else None,
-                            text_content=user_message.content if isinstance(user_message.content, str) else None,
-                            content_parts=user_message.content if isinstance(user_message.content, list) else None,
-                        )
-
-                    await self.execution_ledger_service.mark_running(execution, trace_id=trace_manager.force_trace_id)
-
-                    async with trace_manager as root_span:
-                        try:
-                            agent_input = AgentInput(messages=final_messages)
-                            root_span.attributes = AgentAttributes(
-                                meta=AgentMeta(config=run_config),
-                                inputs=agent_input
-                            )
-                            result = await self.ai_provider.execute_agent_with_billing(
-                                runtime_workspace=runtime_workspace,
-                                module_context=module_context,
-                                agent_input=agent_input,
-                                run_config=run_config,
-                                tool_executor=pipeline_manager.tool_executor,
-                                callbacks=callbacks,
-                                usage_accumulator=usage_accumulator
-                            )
-                            final_result = result
-                            root_span.set_output(result)
-                        except Exception:
-                            if callbacks.final_result:
-                                root_span.set_output(callbacks.final_result)
-                            raise
-                        finally:
-                            if session:
-                                await session_manager.commit(agent_config.deep_memory)
-                                pending_post_commit_dispatch = True
-
-            outcome = (callbacks.final_result.outcome if callbacks and callbacks.final_result else None) or getattr(final_result, "outcome", None)
-            status = ResourceExecutionStatus.SUCCEEDED
-            if outcome == "interrupted":
-                status = ResourceExecutionStatus.INTERRUPTED
-            elif outcome == "cancelled":
-                status = ResourceExecutionStatus.CANCELLED
-
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=status,
+            await persistence.append_events(
+                execution=execution,
+                agent_instance=agent_instance,
+                session_id=getattr(session, "id", None),
+                events=callbacks.get_captured_events(),
+            )
+            await persistence.upsert_tool_histories(
+                execution=execution,
+                agent_instance=agent_instance,
+                session_id=getattr(session, "id", None),
+                turn_id=turn_id,
+                histories=callbacks.get_tool_history(),
             )
             await self.db.commit()
-            if pending_post_commit_dispatch and session_manager:
-                await session_manager.dispatch_post_commit_jobs()
-            if callbacks:
-                try:
-                    await callbacks.emit_prepared_terminal_event()
-                except Exception as exc:
-                    logger.error("Failed to emit terminal event for run %s: %s", execution.run_id, exc, exc_info=True)
-
-        except asyncio.CancelledError:
-            logger.info(f"Agent task cancelled. TraceID: {trace_manager.force_trace_id}")
-            if session_manager:
-                session_manager.clear_post_commit_jobs()
+        except Exception as exc:
+            logger.error("Failed to persist agent run artifacts for run %s: %s", execution.run_id, exc, exc_info=True)
             await self.db.rollback()
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=ResourceExecutionStatus.CANCELLED,
-                error_code="AGENT_CANCELLED",
-                error_message="Operation cancelled.",
-            )
-            await self.db.commit()
-            if callbacks and callbacks.pending_terminal_event:
-                try:
-                    await callbacks.emit_prepared_terminal_event()
-                except Exception as exc:
-                    logger.error("Failed to emit cancel terminal event for run %s: %s", execution.run_id, exc, exc_info=True)
-            raise 
-        except Exception as e:
-            logger.error(f"Agent task error: {e}", exc_info=True)
-            if session_manager:
-                session_manager.clear_post_commit_jobs()
-            await self.db.rollback()
-            if callbacks and not callbacks.has_terminal_event:
-                await callbacks.on_agent_error(e)
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=ResourceExecutionStatus.FAILED,
-                error_code="AGENT_EXECUTION_ERROR",
-                error_message=str(e),
-            )
-            await self.db.commit()
-        finally:
-            await generator_manager.aclose(force=False)
+
+    async def _upsert_run_checkpoint(
+        self,
+        *,
+        execution: ResourceExecution,
+        agent_instance: Optional[Agent],
+        session: Optional[Any],
+        thread_id: str,
+        turn_id: str,
+        checkpoint_kind: str,
+        run_input: Optional[RunAgentInputExt],
+        adapted: ProtocolAdaptedRun,
+        runtime_snapshot: Dict[str, Any],
+        pending_client_tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        persistence = getattr(self, "run_persistence_service", None)
+        if persistence is None or agent_instance is None:
+            return
+        await persistence.upsert_checkpoint(
+            execution=execution,
+            agent_instance=agent_instance,
+            session_id=getattr(session, "id", None),
+            thread_id=thread_id,
+            turn_id=turn_id,
+            checkpoint_kind=checkpoint_kind,
+            run_input_payload=run_input.model_dump(mode="json", by_alias=True, exclude_none=True) if run_input else {},
+            adapted=adapted,
+            runtime_snapshot=runtime_snapshot,
+            pending_client_tool_calls=pending_client_tool_calls,
+        )
+        await self.db.commit()
+
+    async def _delete_run_checkpoint(self, execution_id: int) -> None:
+        persistence = getattr(self, "run_persistence_service", None)
+        if persistence is None:
+            return
+        await persistence.delete_checkpoint(execution_id=execution_id)
+        await self.db.commit()
+
+    async def list_runs(
+        self,
+        instance_uuid: str,
+        *,
+        limit: int = 20,
+    ) -> List[AgentRunSummaryRead]:
+        return await self._query_service().list_runs(instance_uuid, limit=limit)
+
+    async def get_run(self, run_id: str) -> AgentRunDetailRead:
+        return await self._query_service().get_run(run_id)
+
+    async def list_run_events(self, run_id: str, *, limit: int = 1000) -> List[AgentRunEventRead]:
+        return await self._query_service().list_run_events(run_id, limit=limit)
+
+    async def cancel_run(self, run_id: str) -> Dict[str, Any]:
+        return await self._query_service().cancel_run(run_id)
+
+    async def get_active_run(self, instance_uuid: str, actor: User, thread_id: str) -> Optional[AgentRunSummaryRead]:
+        return await self._query_service().get_active_run(
+            instance_uuid=instance_uuid,
+            actor=actor,
+            thread_id=thread_id,
+        )
+
+    async def stream_live_run_events(self, run_id: str, *, after_seq: int = 0):
+        async for envelope in self._query_service().stream_live_events(run_id=run_id, after_seq=after_seq):
+            yield envelope
 
     # --- CRUD Implementation ---
 

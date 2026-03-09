@@ -5,6 +5,7 @@ from typing import Optional
 from app.core.context import AppContext
 from app.models import User, Workspace
 from app.schemas.protocol import RunAgentInputExt
+from app.services.resource.agent.run_control import AgentRunRegistry
 from app.services.resource.agent.types.agent import AgentRunResult
 
 
@@ -61,10 +62,14 @@ class AgentRuntimeRunner:
                     return
 
                 run_result = prepared.result
+                AgentRunRegistry.register(run_result.run_id, asyncio.current_task())
                 if not prepared_future.done():
                     prepared_future.set_result(run_result)
 
-                await runtime_service._run_agent_background_task(**prepared.background_task_kwargs)
+                try:
+                    await runtime_service._run_agent_background_task(**prepared.background_task_kwargs)
+                finally:
+                    AgentRunRegistry.unregister(run_result.run_id)
 
         runner_task = asyncio.create_task(_run())
         try:
@@ -74,5 +79,6 @@ class AgentRuntimeRunner:
                 runner_task.cancel()
             raise
 
+        run_result.task = runner_task
         run_result.cancel = lambda: (not runner_task.done()) and runner_task.cancel()
         return run_result

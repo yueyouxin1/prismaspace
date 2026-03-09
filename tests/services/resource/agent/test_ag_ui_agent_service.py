@@ -7,6 +7,8 @@ from pydantic import ValidationError
 from app.engine.model.llm import LLMMessage
 from app.models.resource.agent import AgentMessageRole
 from app.schemas.protocol import RunAgentInputExt, RunAgentPlatformProps
+from app.schemas.resource.agent.agent_schemas import AgentConfig
+from app.models import ResourceExecutionStatus
 from app.services.resource.agent.ag_ui_processor import AgUiProcessor
 from app.services.resource.agent.agent_service import AgentService
 from app.services.resource.agent.ag_ui_normalizer import AgUiNormalizer
@@ -401,6 +403,79 @@ def test_requires_persistent_session_binding_only_for_session_intent():
     assert AgentService._requires_persistent_session_binding(run_with_uuid_thread) is True
     assert AgentService._requires_persistent_session_binding(run_with_extra_forwarded_prop) is False
     assert AgentService._requires_persistent_session_binding(run_stateless) is False
+
+
+@pytest.mark.asyncio
+async def test_resume_interrupt_uses_checkpoint_pending_tool_calls(monkeypatch):
+    service = object.__new__(AgentService)
+    actor = SimpleNamespace(id=1, uuid="user-1")
+    instance = SimpleNamespace(
+        id=10,
+        uuid="agent-1",
+        agent_config=AgentConfig().model_dump(mode="json"),
+        resource=SimpleNamespace(workspace=SimpleNamespace(id=9)),
+    )
+    parent_execution = SimpleNamespace(
+        id=20,
+        run_id="123e4567-e89b-12d3-a456-426614174000",
+        status=ResourceExecutionStatus.INTERRUPTED,
+        resource_instance_id=10,
+        user_id=1,
+        thread_id="thread-1",
+    )
+    checkpoint = SimpleNamespace(
+        pending_client_tool_calls=[{"tool_call_id": "call-1"}],
+        adapted_snapshot={"custom_history": [], "resume_messages": [], "has_custom_history": False},
+    )
+
+    service.get_by_uuid = AsyncMock(return_value=instance)
+    service.context = SimpleNamespace()
+    service._check_execute_perm = AsyncMock(return_value=None)
+    service._resolve_runtime_workspace = AsyncMock(return_value=SimpleNamespace(id=9))
+    service.protocol_adapters = SimpleNamespace(get=lambda _: AgUiProtocolAdapter())
+    monkeypatch.setattr("app.services.resource.agent.run_preparation.ResourceAwareToolExecutor", lambda context, workspace: SimpleNamespace())
+    service.ref_dao = SimpleNamespace(get_dependencies=AsyncMock(return_value=[]))
+    service.execution_ledger_service = SimpleNamespace(
+        resolve_parent_execution=AsyncMock(return_value=parent_execution),
+        resolve_lineage_root_run_id=AsyncMock(return_value="turn-1"),
+    )
+    service.run_persistence_service = SimpleNamespace(
+        get_checkpoint=AsyncMock(return_value=checkpoint),
+    )
+    service._normalize_thread_id = AgentService._normalize_thread_id
+    service._resolve_session_mode = AgentService._resolve_session_mode
+    service._requires_persistent_session_binding = AgentService._requires_persistent_session_binding
+    service._normalize_parent_run_id = AgentService._normalize_parent_run_id
+    service._normalize_interrupt_id = AgentService._normalize_interrupt_id
+    service._resolve_protocol_name = AgentService._resolve_protocol_name
+    service._restore_adapted_from_checkpoint = AgentService._restore_adapted_from_checkpoint
+    service.module_service = SimpleNamespace()
+    service._build_stream_message_ids = AgentService._build_stream_message_ids
+    service.db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    run_input = RunAgentInputExt.model_validate(
+        {
+            "threadId": "thread-1",
+            "runId": "run-2",
+            "state": {},
+            "messages": [{"id": "a1", "role": "assistant", "content": "waiting"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {},
+            "resume": {
+                "interruptId": "123e4567-e89b-12d3-a456-426614174000",
+                "payload": {"toolResults": [{"toolCallId": "call-x", "content": {"ok": True}}]},
+            },
+        }
+    )
+
+    with pytest.raises(ServiceException, match="missing tool results"):
+        await service._prepare_async_run(
+            instance_uuid="agent-1",
+            run_input=run_input,
+            actor=actor,
+            runtime_workspace=None,
+        )
 
 
 def test_resolve_model_context_window_with_fallback_keys():

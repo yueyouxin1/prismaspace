@@ -33,6 +33,13 @@ class AgentResult(BaseModel):
     outcome: Literal["completed", "interrupted", "cancelled", "error"] = "completed"
 
 
+class AgentRuntimeCheckpoint(BaseModel):
+    phase: Literal["before_llm", "after_tools", "interrupt"]
+    messages: List[LLMMessage] = Field(default_factory=list)
+    tools: List[LLMTool] = Field(default_factory=list)
+    pending_client_tool_calls: List[AgentClientToolCall] = Field(default_factory=list)
+
+
 class ToolExecutionInterrupt(BaseModel):
     """
     引擎级中断信号。
@@ -95,6 +102,10 @@ class AgentEngineCallbacks(ABC):
     async def on_usage(self, usage: LLMUsage) -> None:
         """在生成结束后，报告本次调用的token用量。"""
         ...
+
+    async def on_checkpoint_snapshot(self, snapshot: AgentRuntimeCheckpoint) -> None:
+        """可选回调：当引擎需要冻结可恢复上下文时调用。"""
+        return None
         
 # --- Agent 引擎的插件化执行器协议 ---
 class BaseToolExecutor(ABC):

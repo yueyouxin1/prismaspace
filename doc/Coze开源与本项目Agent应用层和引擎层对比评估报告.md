@@ -681,3 +681,138 @@ Coze 支持的灵活性是“业务模式级”的：
 - 本项目当前 workflow 节点模板/执行器仍是明显早期状态。
 
 这些数字本身不决定胜负，但与前面的结构判断是相互印证的。
+
+---
+
+## 16. 2026-03-09 升级后对照清单
+
+以下对照基于 **2026年3月9日当前工作树代码** 的实际实现状态，目的是回答三个问题：
+
+1. 经过升级后，PrismaSpace Agent 是否仍然只是“产品级聊天服务”？
+2. 经过升级后，PrismaSpace Agent 是否已经覆盖 Coze Agent 的核心生产运行能力？
+3. 经过升级后，哪些差异仍然存在，哪些已经不再是关键短板？
+
+先给结论：
+
+- **升级后，PrismaSpace Agent 已经补齐了 Coze Agent 在“run 治理 / durable history / cancel signal / 事件时间线 / AG-UI 生产链路”上的大部分核心能力。**
+- **升级后，PrismaSpace Agent 已进一步补上 canonical runtime checkpoint、统一 `/sse` 自动附着活跃 run、WebSocket 活跃 run 附着、终态 checkpoint 清理等生产级体验能力。**
+- **升级后，PrismaSpace Agent 已达到“生产主链路可用”的工程水准。**
+- **升级后，PrismaSpace Agent 仍未 100% 等同 Coze 的完整平台能力，但已经合理达到 Coze Agent 的核心生产水准。**
+
+当前仍未完全覆盖的主要差距集中在：
+
+- 更彻底的 `engine checkpoint restore`（当前已引入更接近 engine-level 的 canonical checkpoint，但仍不是 Coze 那种完整执行栈恢复）
+- 更强的 `Agent / Workflow` 统一执行底座（当前已共享 execution ledger / cancel / timeline，但还不是完全一体化 runtime）
+- 更重的 `Application / Domain / Repo / Infra` 分层颗粒度
+- 更成熟的 `connector / draft / publish / openapi product surface`
+
+### 16.1 总览结论表
+
+| 维度 | Coze / Agent | 本项目 Agent（调整前） | 本项目 Agent（调整后，现状） | 现状判断 |
+|---|---|---|---|---|
+| 总体定位 | 平台级、生产级 Agent 系统 | 产品级 AG-UI Agent 服务 | 生产级 Agent Runtime + durable run control plane + live attach | **已明显逼近 Coze 核心面，但未完全等同** |
+| 运行时成熟度 | 高 | 中 | 高 | **已达到生产主链路水准** |
+| 平台化完整度 | 高 | 低到中 | 中到高 | **仍低于 Coze 完整平台面** |
+| 执行治理能力 | 完整 | 偏轻 | 强 | **大部分已补齐** |
+| 架构正确性 | 高 | 中等偏上 | 高 | **已显著改善** |
+
+### 16.2 功能能力对照表
+
+| 功能点 | Coze / Agent | 本项目 Agent（调整前） | 本项目 Agent（调整后，现状） | 覆盖 Coze 情况 |
+|---|---|---|---|---|
+| AG-UI / 流式协议输出 | 支持多种协议/流 | 已支持 AG-UI | 保持 AG-UI，不破协议 | 已覆盖当前协议目标 |
+| SSE / WebSocket | 完整 | 支持 | 支持，且补了 run task 收尾 | 已覆盖主链路 |
+| Session Mode | 完整 | `auto/stateless/stateful` | 保留 | 已覆盖 |
+| Client-side Tool Interrupt | 完整 | 支持 | 支持 | 已覆盖 |
+| Run Execution Ledger | 完整 | 支持基础 run ledger | 支持，且打通 Agent run query 面 | 已覆盖核心能力 |
+| Run Query | 完整 | 无 | 已支持 `list/get runs` | 已覆盖 |
+| Run Events Timeline | 完整 | 无 | 已支持 durable event log | 已覆盖核心能力 |
+| Run Replay | 完整 | 无 | 已支持基于持久化事件 replay | 已覆盖核心能力 |
+| Active Run Attach | 完整 | 无 | 已支持按 thread 自动附着 active run | 已覆盖核心体验 |
+| Tool / Step History | 完整 | 无 | 已持久化 `tool/step execution history` | 已覆盖核心能力 |
+| Cancel Signal Store | 完整 | 无显式 substrate | 已支持 Redis cancel signal + local registry | 已覆盖核心能力 |
+| Checkpoint | 完整 | 无 | 已引入 AgentRunCheckpoint，且保存 canonical runtime snapshot | 已覆盖核心恢复能力 |
+| Resume 校验 | 完整 | 主要依赖消息重放 | 已支持 checkpoint + pending tool calls 严格校验 | 已显著改善 |
+| Resume 恢复来源 | checkpoint canonical context | 主要依赖 session/history 重放 | 优先使用 checkpoint 中冻结的 runtime messages/tools 上下文 | 已显著改善 |
+| Resume 完整恢复 | 完整 | 弱 | 中到强 | **接近 Coze，但未完全同级** |
+| Deep Memory | 完整/平台化 | 支持 | 支持 | 已覆盖 |
+| RAG | 完整 | 支持 | 支持 | 已覆盖 |
+| Resource as Tool | 完整 | 支持 | 支持 | 已覆盖 |
+| Workflow as Agent 原生执行单元 | 完整 | 间接支持 | 比之前更接近统一 runtime，但仍未完全一体化 | 部分覆盖 |
+
+### 16.3 架构与分层对照表
+
+| 架构点 | Coze / Agent | 本项目 Agent（调整前） | 本项目 Agent（调整后，现状） | 判断 |
+|---|---|---|---|---|
+| API/Application/Domain 分层 | 明确 | API 很薄，但大量职责压进 AgentService | 仍是 Python 服务结构，但已开始拆出 run preparation / execution / query | **已明显改善** |
+| AgentService 体量 | 应用层较薄 | 很重，God Service 趋势明显 | 仍是兼容门面，但已拆出 run preparation / execution / query | **关键短板已开始收口** |
+| 执行历史持久化 | 完整 | 偏轻 | 已有 run events / tool history / checkpoint | 已达到生产级核心要求 |
+| Cancel / Resume / Interrupt 一等公民 | 是 | 部分 | 是（对外已具备） | 已覆盖主链路 |
+| Agent / Workflow 统一执行面 | 强 | 弱 | 已共享 ledger/cancel/history 等 substrate | 部分覆盖 |
+| Query / Replay 面 | 强 | 弱 | 已有 runs / events / replay / cancel | 已覆盖主链路 |
+| 事件与消息持久化解耦 | 强 | 偏弱 | 已开始把 AG-UI event timeline 从消息持久化中独立出来 | 已显著改善 |
+
+### 16.4 恢复语义对照表
+
+| 恢复维度 | Coze / Agent | 本项目 Agent（调整前） | 本项目 Agent（调整后，现状） | 判断 |
+|---|---|---|---|---|
+| resume 依据 | checkpoint + interrupt state | 主要依赖 session/history 重放 | checkpoint + pending tool calls 校验 + canonical runtime snapshot | **已显著逼近 Coze** |
+| 中断点校验 | 强 | 弱 | 强 | 已覆盖 |
+| tool result 对齐校验 | 强 | 弱 | 强 | 已覆盖 |
+| 原地恢复执行栈 | 强 | 弱 | 更接近，但仍不完全 | **仍弱于 Coze** |
+| 多层复杂中断恢复 | 强 | 弱 | 中 | 已改善，但未完全追平 |
+
+### 16.5 性能与生产水准对照表
+
+| 维度 | Coze / Agent | 本项目 Agent（调整前） | 本项目 Agent（调整后，现状） | 判断 |
+|---|---|---|---|---|
+| 简单链路执行成本 | 一般 | 较轻 | 较轻 | 本项目仍有优势 |
+| 复杂链路稳定性 | 强 | 一般 | 强 | 已达到生产主链路要求 |
+| 长对话可治理性 | 强 | 一般 | 强 | 已达到生产主链路要求 |
+| 中断恢复可靠性 | 强 | 弱 | 中到强 | 已显著改善 |
+| 断连后后台继续执行 | 强 | 弱 | 强 | 已达到生产主链路要求 |
+| 断连后自动重新接流 | 强 | 无 | 强（SSE/WS 均可自动附着 active run） | 已达到生产级体验要求 |
+| 运行审计能力 | 强 | 弱 | 强 | 已达生产级核心要求 |
+| 事件回放能力 | 强 | 无 | 强 | 已达生产级 |
+| 测试覆盖层级 | 高 | 中 | 中到高 | 当前主链路已足够，但仍弱于 Coze 总体深度 |
+
+### 16.6 升级前后差异清单
+
+| 能力项 | 调整前 | 调整后（现状） | 变化结论 |
+|---|---|---|---|
+| 是否只有 run ledger | 是 | 否，已补 run events / tool history / checkpoint | 已修正 |
+| 是否可查询 run detail | 否 | 是 | 已修正 |
+| 是否可回放 run events | 否 | 是 | 已修正 |
+| 是否有 cancel signal substrate | 否 | 是 | 已修正 |
+| resume 是否主要靠消息重放 | 是 | 否，已加入 checkpoint 补强 | 已修正 |
+| 断连是否默认取消 run | 是 | 否 | 已修正 |
+| 是否能统一 `/sse` 自动附着 active run | 否 | 是 | 已修正 |
+| 终态 checkpoint 是否继续长期保留 | 是/无 | 否，终态直接清理 | 已修正 |
+| 是否有 tool/step history | 否 | 是 | 已修正 |
+| AgentService 是否继续无限膨胀 | 是 | 否，已开始抽离 preparation / execution / query | 已显著改善 |
+| AG-UI 协议是否被破坏 | 否 | 否 | 已保持兼容 |
+
+### 16.7 最终验证结论（2026-03-09）
+
+| 问题 | 结论 |
+|---|---|
+| 升级后是否仍只是“产品级聊天服务”？ | **否。** 已进入生产级 Agent Runtime 范畴。 |
+| 升级后是否达到生产主链路水准？ | **是。** run query、event timeline、replay、cancel、tool history、checkpoint、active-run attach 已具备。 |
+| 升级后是否已覆盖 Coze Agent 的核心运行治理能力？ | **大体是。** 核心运行治理能力已覆盖大部分。 |
+| 升级后是否已 100% 等同 Coze Agent 全平台能力？ | **否。** 仍缺更彻底的 engine checkpoint restore、更完整的平台化分层与产品面。 |
+| 当前是否可以宣称“合理符合 Coze Agent 生产水准”？ | **可以。** 前提是口径聚焦在 Agent 核心运行时与生产主链路，而不是宣称完全等同 Coze 全平台。 |
+
+### 16.7 最终验证结论2（2026-03-09）
+| 差距点 | 当前状态 | 为什么还没完全追平 Coze |
+|---|---|---|
+| Engine-level canonical checkpoint | 已开始在引擎循环内捕获 `messages/tools/pending_client_tool_calls`，但仍有一部分恢复逻辑在 service 层协同 | 还不是完全由引擎独立持有和恢复“执行栈原态” |
+| 原地恢复执行栈 | 已能基于 checkpoint 补强恢复，显著优于查库重组 | 还没有做到 Coze 那种更彻底的“从中断点原地继续” |
+| Agent / Workflow 统一执行底座 | 已共享 ledger / cancel / history / replay 等 substrate | Agent 和 Workflow 仍是两套 runtime，而不是完全同一个执行内核 |
+| Application / Domain / Repo / Infra 分层颗粒度 | 已拆出 `run_preparation / run_execution / run_query` | 仍未达到 Coze 那种更重的多层平台分层 |
+| 产品面平台能力 | 已有 run query / events / replay / cancel / active-run attach | 仍缺更完整的 connector / publish / OpenAPI / 平台化产品面 |
+| 调试观察系统 | 已有 run timeline、tool history、replay | 还没做到完整调用树 / 火焰图 / Trace 主视图整合 |
+| 分布式多 worker 恢复治理 | 已有 Redis cancel signal、live buffer、active run attach | 还不是 Coze 那种更完整的 checkpoint store + 分布式执行治理 |
+| 长期数据治理 | 已有终态 checkpoint 清理、live buffer TTL | 还缺更系统化的 retention / archival / compaction 策略体系 |
+
+一句话总结：
+**当前已经合理达到 Coze 的核心生产主链路水准；剩余差距主要集中在“更彻底的执行栈恢复”和“更重的平台化产品层能力”。**

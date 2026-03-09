@@ -3,11 +3,13 @@
 from enum import Enum
 from pydantic import BaseModel, Field, ConfigDict, model_validator, conint, confloat
 from typing import Literal, Union, Dict, List, Any, Optional
+from datetime import datetime
 from app.schemas.resource.resource_schemas import InstanceUpdate, InstanceRead
 from app.schemas.resource.knowledge.knowledge_schemas import RAGConfig
 from app.engine.model.llm import LLMMessage
 from app.schemas.common import ExecutionRequest, ExecutionResponse
 from app.schemas.protocol import RunAgentInputExt, RunEventsResponse
+from app.models.resource.agent import AgentRunCheckpoint, AgentRunEvent, AgentToolExecution
 
 # ==============================================================================
 # 1. 配置子模型 (Sub-Configuration Models)
@@ -165,3 +167,104 @@ class AgentExecutionResponse(ExecutionResponse):
     """
 
     data: RunEventsResponse
+
+
+class AgentRunEventRead(BaseModel):
+    sequence_no: int
+    event_type: str
+    payload: Dict[str, Any]
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_event(cls, data: Any) -> Any:
+        if isinstance(data, AgentRunEvent):
+            return {
+                "sequence_no": data.sequence_no,
+                "event_type": data.event_type,
+                "payload": data.payload or {},
+                "created_at": data.created_at,
+            }
+        return data
+
+
+class AgentToolExecutionRead(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    status: str
+    step_index: Optional[int] = None
+    thought: Optional[str] = None
+    arguments: Optional[Dict[str, Any]] = None
+    result: Optional[Any] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_tool_execution(cls, data: Any) -> Any:
+        if isinstance(data, AgentToolExecution):
+            return {
+                "tool_call_id": data.tool_call_id,
+                "tool_name": data.tool_name,
+                "status": data.status,
+                "step_index": data.step_index,
+                "thought": data.thought,
+                "arguments": data.arguments,
+                "result": data.result,
+                "error_message": data.error_message,
+                "created_at": data.created_at,
+                "updated_at": data.updated_at,
+            }
+        return data
+
+
+class AgentRunSummaryRead(BaseModel):
+    run_id: str
+    thread_id: str
+    parent_run_id: Optional[str] = None
+    status: str
+    trace_id: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class AgentRunCheckpointRead(BaseModel):
+    thread_id: str
+    turn_id: str
+    checkpoint_kind: str
+    runtime_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    pending_client_tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_checkpoint(cls, data: Any) -> Any:
+        if isinstance(data, AgentRunCheckpoint):
+            return {
+                "thread_id": data.thread_id,
+                "turn_id": data.turn_id,
+                "checkpoint_kind": data.checkpoint_kind,
+                "runtime_snapshot": data.runtime_snapshot or {},
+                "pending_client_tool_calls": data.pending_client_tool_calls or [],
+                "created_at": data.created_at,
+                "updated_at": data.updated_at,
+            }
+        return data
+
+
+class AgentRunDetailRead(AgentRunSummaryRead):
+    agent_instance_uuid: str
+    agent_name: str
+    latest_checkpoint: Optional[AgentRunCheckpointRead] = None
+    events: List[AgentRunEventRead] = Field(default_factory=list)
+    tool_executions: List[AgentToolExecutionRead] = Field(default_factory=list)

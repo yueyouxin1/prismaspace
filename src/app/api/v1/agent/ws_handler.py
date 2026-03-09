@@ -25,14 +25,17 @@ class AgentSessionHandler:
 
     async def run(self):
         await self.websocket.accept()
+        cancel_on_close = False
         try:
             while True:
                 text = await self.websocket.receive_text()
                 await self._dispatch(text)
         except WebSocketDisconnect:
             logger.info("AG-UI websocket disconnected: %s", self.user.uuid)
+            cancel_on_close = False
         finally:
-            await self._cancel_current_task()
+            if cancel_on_close:
+                await self._cancel_current_task()
 
     async def _dispatch(self, text: str):
         try:
@@ -134,11 +137,18 @@ class AgentSessionHandler:
             )
             service = AgentService(app_context)
             try:
-                run_result = await service.async_execute(agent_uuid, run_input, self.user)
-                cancel_fn = getattr(run_result, "cancel", None)
-                self.current_run_id = getattr(run_result, "run_id", None)
-                async for event in run_result.generator:
-                    await self._send_event(event)
+                active_run = await service.get_active_run(agent_uuid, self.user, run_input.thread_id)
+                if active_run:
+                    active_run_id = active_run["run_id"] if isinstance(active_run, dict) else getattr(active_run, "run_id", None)
+                    self.current_run_id = active_run_id
+                    async for envelope in service.stream_live_run_events(active_run_id, after_seq=0):
+                        await self._send_event(envelope.get("payload", envelope))
+                else:
+                    run_result = await service.async_execute(agent_uuid, run_input, self.user)
+                    cancel_fn = getattr(run_result, "cancel", None)
+                    self.current_run_id = getattr(run_result, "run_id", None)
+                    async for event in run_result.generator:
+                        await self._send_event(event)
             except asyncio.CancelledError:
                 if callable(cancel_fn):
                     cancel_fn()
@@ -164,6 +174,11 @@ class AgentSessionHandler:
             finally:
                 if callable(cancel_fn):
                     cancel_fn()
+                if run_result and getattr(run_result, "task", None):
+                    try:
+                        await run_result.task
+                    except Exception:
+                        pass
 
     async def _send_event(self, event: Any):
         if hasattr(event, "model_dump_json"):

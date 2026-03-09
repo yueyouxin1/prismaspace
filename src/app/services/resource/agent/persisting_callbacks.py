@@ -1,6 +1,7 @@
 import json
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+import asyncio
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from ag_ui.core import (
     ActivityDeltaEvent,
@@ -29,7 +30,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 
-from app.engine.agent import AgentClientToolCall, AgentEngineCallbacks, AgentResult, AgentStep
+from app.engine.agent import AgentClientToolCall, AgentEngineCallbacks, AgentResult, AgentRuntimeCheckpoint, AgentStep
 from app.engine.model.llm import LLMToolCall, LLMToolCallChunk, LLMUsage
 from app.models.resource.agent import AgentMessageRole
 from app.schemas.protocol import (
@@ -62,6 +63,8 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         run_input: Optional[RunAgentInputExt] = None,
         message_ids: Optional[AgentStreamMessageIds] = None,
         interrupt_id_builder: Optional[Callable[[str], str]] = None,
+        cancel_checker: Optional[Callable[[], Awaitable[bool]]] = None,
+        event_sink: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.trace_id = trace_id
         self.session_manager = session_manager
@@ -74,6 +77,8 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.run_id = canonical_run_id
         self.turn_id = turn_id or canonical_run_id
         self.interrupt_id_builder = interrupt_id_builder or (lambda value: value)
+        self.cancel_checker = cancel_checker
+        self.event_sink = event_sink
         self.input_payload = (
             run_input.model_dump(mode="json", by_alias=True, exclude_none=True)
             if run_input
@@ -94,6 +99,10 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self.tool_call_stream_states: Dict[str, Dict[str, Any]] = {}
         self.tool_call_index_states: Dict[int, Dict[str, Any]] = {}
         self._emitted_encrypted_entities: Set[str] = set()
+        self._captured_events: List[Dict[str, Any]] = []
+        self._tool_history: Dict[str, Dict[str, Any]] = {}
+        self._step_counter: int = 0
+        self._runtime_checkpoint_snapshot: Dict[str, Any] = {}
 
     def _base_meta(self) -> Dict[str, Any]:
         thread_id = (
@@ -110,6 +119,14 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         }
 
     async def _emit(self, event: Any):
+        if self.cancel_checker is not None and await self.cancel_checker():
+            raise asyncio.CancelledError()
+        if hasattr(event, "model_dump"):
+            payload = event.model_dump(mode="json", by_alias=True, exclude_none=True)
+            event_type = payload.get("type", "RAW")
+            self._captured_events.append({"event_type": event_type, "payload": payload})
+            if self.event_sink is not None:
+                await self.event_sink(payload)
         await self.generator_manager.put(event)
 
     async def _emit_custom(self, name: str, value: Any):
@@ -368,6 +385,19 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                 entity_id=tool_call_id,
                 encrypted_value=tool_call.get("encryptedValue") or tool_call.get("encrypted_value"),
             )
+            self._tool_history.setdefault(
+                tool_call_id,
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "status": "pending",
+                    "step_index": None,
+                    "thought": None,
+                    "arguments": self._safe_json_load(tool_args),
+                    "result": None,
+                    "error_message": None,
+                },
+            )
 
         self.tool_call_stream_states.clear()
         self.tool_call_index_states.clear()
@@ -418,6 +448,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             index_state["args_emitted"] = True
 
     async def on_agent_step(self, step: AgentStep):
+        self._step_counter += 1
         step_name = step.action.function.get("name", "") if isinstance(step.action.function, dict) else ""
         step_name = step_name or step.action.id
         await self._emit(StepStartedEvent(type=EventType.STEP_STARTED, step_name=step_name))
@@ -434,16 +465,34 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             if isinstance(step.observation, str)
             else json.dumps(step.observation, ensure_ascii=False)
         )
+        tool_call_id = step.action.id
+        tool_record = self._tool_history.setdefault(
+            tool_call_id,
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": step.action.function.get("name", "") if isinstance(step.action.function, dict) else tool_call_id,
+                "status": "pending",
+                "step_index": None,
+                "thought": None,
+                "arguments": self._safe_json_load(step.action.function.get("arguments", "{}")) if isinstance(step.action.function, dict) else {},
+                "result": None,
+                "error_message": None,
+            },
+        )
+        tool_record["status"] = "completed"
+        tool_record["step_index"] = self._step_counter
+        tool_record["thought"] = step.thought
+        tool_record["result"] = self._normalize_json(step.observation)
         await self._emit(
             ToolCallResultEvent(
                 type=EventType.TOOL_CALL_RESULT,
                 message_id=self.assistant_message_id,
-                tool_call_id=step.action.id,
+                tool_call_id=tool_call_id,
                 content=output_text,
                 role="tool",
             )
         )
-        await self._finalize_activity_tool(step.action.id, "completed", result=output_text)
+        await self._finalize_activity_tool(tool_call_id, "completed", result=output_text)
         await self._emit(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=step_name))
         if self.session_manager:
             self.session_manager.buffer_message(
@@ -586,6 +635,20 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
     async def on_agent_interrupt(self, result: AgentResult):
         for call in result.client_tool_calls or []:
             await self._finalize_activity_tool(call.tool_call_id, "awaiting_client")
+            tool_record = self._tool_history.setdefault(
+                call.tool_call_id,
+                {
+                    "tool_call_id": call.tool_call_id,
+                    "tool_name": call.name,
+                    "status": "awaiting_client",
+                    "step_index": None,
+                    "thought": None,
+                    "arguments": self._normalize_json(call.arguments),
+                    "result": None,
+                    "error_message": None,
+                },
+            )
+            tool_record["status"] = "awaiting_client"
         await self._prepare_terminal_event(
             result=result,
             outcome="interrupt",
@@ -599,6 +662,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         )
 
     async def on_agent_cancel(self, result: AgentResult) -> None:
+        self._mark_unfinished_tools("cancelled", "Operation cancelled.")
         await self._prepare_terminal_event(
             result=result,
             outcome="cancelled",
@@ -609,6 +673,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
     async def on_agent_error(self, error: Exception):
         if self.has_terminal_event:
             return
+        self._mark_unfinished_tools("error", str(error))
         self.has_terminal_event = True
         self.pending_terminal_event = None
         await self._close_open_messages()
@@ -630,6 +695,65 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
                     delta=[{"op": "replace", "path": "/runStatus", "value": "error"}],
                 )
             )
+
+    @staticmethod
+    def _safe_json_load(raw: Any) -> Any:
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"raw": raw}
+        return raw
+
+    @staticmethod
+    def _normalize_json(value: Any) -> Any:
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return {"raw": str(value)}
+
+    def _mark_unfinished_tools(self, status: str, error_message: Optional[str]) -> None:
+        for item in self._tool_history.values():
+            if item["status"] in {"completed", "awaiting_client"}:
+                continue
+            item["status"] = status
+            item["error_message"] = error_message
+
+    def get_captured_events(self) -> List[Dict[str, Any]]:
+        return list(self._captured_events)
+
+    def get_tool_history(self) -> List[Dict[str, Any]]:
+        return list(self._tool_history.values())
+
+    async def on_checkpoint_snapshot(self, snapshot: AgentRuntimeCheckpoint) -> None:
+        self._runtime_checkpoint_snapshot = {
+            "phase": snapshot.phase,
+            "messages": [
+                message.model_dump(mode="json", by_alias=True, exclude_none=True)
+                if hasattr(message, "model_dump")
+                else message
+                for message in snapshot.messages
+            ],
+            "tools": [
+                tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                if hasattr(tool, "model_dump")
+                else tool
+                for tool in snapshot.tools
+            ],
+            "pending_client_tool_calls": [
+                {
+                    "tool_call_id": item.tool_call_id,
+                    "name": item.name,
+                    "arguments": self._normalize_json(item.arguments),
+                }
+                for item in snapshot.pending_client_tool_calls
+            ],
+        }
+
+    def get_runtime_checkpoint_snapshot(self) -> Dict[str, Any]:
+        return dict(self._runtime_checkpoint_snapshot)
 
     async def on_usage(self, usage: LLMUsage):
         if self.usage_accumulator:
