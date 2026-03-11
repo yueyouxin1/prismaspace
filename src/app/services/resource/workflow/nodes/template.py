@@ -7,6 +7,63 @@ from app.engine.schemas.form_schema import FormProperty
 from app.engine.model.llm import LLMMessage
 from app.schemas.resource.agent.agent_schemas import AgentSchema
 
+
+def form_item(
+    *,
+    id: str,
+    label: str,
+    control: str,
+    model_path: str,
+    desc: Optional[str] = None,
+    props: Optional[dict] = None,
+    role: str = "default",
+    required: Optional[bool] = None,
+    required_when=None,
+    visible=True,
+    disabled=False,
+) -> FormProperty:
+    return FormProperty(
+        id=id,
+        label=label,
+        desc=desc,
+        type="form",
+        control=control,
+        form_type=control,
+        model_path=model_path,
+        output_key=model_path,
+        props=props or {},
+        role=role,
+        form_role=role,
+        required=required,
+        required_when=required_when,
+        state={"visible": visible, "disabled": disabled},
+        show_expr=visible,
+        disabled_expr=disabled,
+        required_expr=required_when if required_when is not None else required,
+    )
+
+
+def schema_form(
+    *,
+    id: str,
+    label: str,
+    model_path: str,
+    desc: Optional[str] = None,
+) -> FormProperty:
+    return form_item(
+        id=id,
+        label=label,
+        control="parameter_schema",
+        model_path=model_path,
+        desc=desc,
+        role="schema",
+        props={
+            "editor_kind": "regular",
+            "layout": "compact",
+            "collection": True,
+        },
+    )
+
 class ResourceNodeConfig(BaseNodeConfig):
     resource_instance_uuid: str = Field(...)
     model_config = ConfigDict(extra="forbid")
@@ -37,29 +94,39 @@ LLM_TEMPLATE = NodeTemplate(
     
     # UI 表单定义
     forms=[
-        FormProperty(
+        schema_form(
+            id="llm_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义大语言模型节点的输入变量。",
+        ),
+        schema_form(
+            id="llm_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义大语言模型节点的输出变量。",
+        ),
+        form_item(
+            id="llm_model",
             label="模型选择",
-            type="form",
-            form_type="model_selector",
-            output_key="config.llm_module_version_uuid",
+            control="model_selector",
+            model_path="config.llm_module_version_uuid",
             props={"type": "llm"},
-            show_expr=True
+            required=True,
         ),
-        FormProperty(
+        form_item(
+            id="llm_system_prompt",
             label="系统提示词",
-            type="form",
-            form_type="textarea",
-            output_key="config.system_prompt",
-            show_expr=True
+            control="textarea",
+            model_path="config.system_prompt",
         ),
-        FormProperty(
+        form_item(
+            id="llm_temperature",
             label="随机性",
-            type="form",
-            form_type="slider",
-            output_key="config.temperature",
+            control="slider",
+            model_path="config.temperature",
             props={"min": 0, "max": 1, "step": 0.1},
-            show_expr=True
-        )
+        ),
     ]
 )
 
@@ -90,21 +157,32 @@ AGENT_TEMPLATE = NodeTemplate(
     ),
     # UI 表单定义
     forms=[
-        FormProperty(
-            label="选择智能体",
-            type="form",
-            form_type="resource_selector",
-            output_key="config.resource_instance_uuid",
-            props={"resource_type": "agent"},
-            show_expr=True
+        schema_form(
+            id="agent_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义 Agent 节点的输入变量。",
         ),
-        FormProperty(
+        schema_form(
+            id="agent_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义 Agent 节点的输出变量。",
+        ),
+        form_item(
+            id="agent_resource",
+            label="选择智能体",
+            control="resource_selector",
+            model_path="config.resource_instance_uuid",
+            props={"resource_type": "agent"},
+            required=True,
+        ),
+        form_item(
+            id="agent_input_query",
             label="用户输入",
-            type="form",
-            form_type="textarea",
-            output_key="config.input_query",
-            show_expr=True
-        )
+            control="textarea",
+            model_path="config.input_query",
+        ),
     ]
 )
 
@@ -126,14 +204,26 @@ TOOL_TEMPLATE = NodeTemplate(
         config=ToolNodeConfig(resource_instance_uuid="")
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="tool_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义工具节点的输入变量。",
+        ),
+        schema_form(
+            id="tool_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义工具节点的输出变量。",
+        ),
+        form_item(
+            id="tool_resource",
             label="选择工具",
-            type="form",
-            form_type="resource_selector",
-            output_key="config.resource_instance_uuid",
+            control="resource_selector",
+            model_path="config.resource_instance_uuid",
             props={"resource_type": "tool"},
-            show_expr=True
-        )
+            required=True,
+        ),
     ]
 )
 
@@ -157,13 +247,25 @@ WORKFLOW_TEMPLATE = NodeTemplate(
         config=WorkflowNodeConfig(resource_instance_uuid=""),
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="workflow_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义子工作流节点的输入变量。",
+        ),
+        schema_form(
+            id="workflow_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义子工作流节点的输出变量。",
+        ),
+        form_item(
+            id="workflow_resource",
             label="选择工作流",
-            type="form",
-            form_type="resource_selector",
-            output_key="config.resource_instance_uuid",
+            control="resource_selector",
+            model_path="config.resource_instance_uuid",
             props={"resource_type": "workflow"},
-            show_expr=True,
-        )
+            required=True,
+        ),
     ],
 )

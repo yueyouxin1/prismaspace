@@ -5,6 +5,63 @@ from ..definitions import WorkflowNode, NodeData, BaseNodeConfig, ExecutionPolic
 from ...schemas.parameter_schema import ParameterSchema 
 from ...schemas.form_schema import FormProperty
 
+
+def form_item(
+    *,
+    id: str,
+    label: str,
+    control: str,
+    model_path: str,
+    desc: Optional[str] = None,
+    props: Optional[dict] = None,
+    role: str = "default",
+    required: Optional[bool] = None,
+    required_when=None,
+    visible=True,
+    disabled=False,
+) -> FormProperty:
+    return FormProperty(
+        id=id,
+        label=label,
+        desc=desc,
+        type="form",
+        control=control,
+        form_type=control,
+        model_path=model_path,
+        output_key=model_path,
+        props=props or {},
+        role=role,
+        form_role=role,
+        required=required,
+        required_when=required_when,
+        state={"visible": visible, "disabled": disabled},
+        show_expr=visible,
+        disabled_expr=disabled,
+        required_expr=required_when if required_when is not None else required,
+    )
+
+
+def schema_form(
+    *,
+    id: str,
+    label: str,
+    model_path: str,
+    desc: Optional[str] = None,
+) -> FormProperty:
+    return form_item(
+        id=id,
+        label=label,
+        control="parameter_schema",
+        model_path=model_path,
+        desc=desc,
+        role="schema",
+        props={
+            "editor_kind": "regular",
+            "layout": "compact",
+            "collection": True,
+        },
+    )
+
 # ============================================================================
 # 1. Start Node Template
 # ============================================================================
@@ -22,7 +79,14 @@ START_TEMPLATE = NodeTemplate(
         outputs=[], # Start 的 outputs 通常由用户定义
         config=StartNodeConfig()
     ),
-    forms=[]
+    forms=[
+        schema_form(
+            id="start_outputs",
+            label="输入",
+            model_path="outputs",
+            desc="定义工作流启动时可接收的输入变量。",
+        ),
+    ]
 )
 
 # ============================================================================
@@ -47,15 +111,29 @@ OUTPUT_TEMPLATE = NodeTemplate(
         config=OutputNodeConfig(returnType="Object")
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="output_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义输出节点可消费的输入参数。",
+        ),
+        form_item(
+            id="output_return_type",
             label="输出方式",
-            type="form",
-            form_type="radio_group",
-            output_key="config.returnType",
+            control="radio_group",
+            model_path="config.returnType",
             props={"options": [{"label": "结构化对象", "value": "Object"}, {"label": "纯文本", "value": "Text"}]},
-            show_expr=True,
-            required_expr=True
-        )
+            required=True,
+        ),
+        form_item(
+            id="output_content",
+            label="输出模板",
+            control="textarea",
+            model_path="config.content",
+            desc="当输出方式为纯文本时，定义最终输出模板。",
+            visible="config.returnType == 'Text'",
+            required_when="config.returnType == 'Text'",
+        ),
     ]
 )
 
@@ -71,15 +149,29 @@ END_TEMPLATE = NodeTemplate(
         config=OutputNodeConfig(returnType="Object")
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="end_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义工作流结束节点的返回值结构。",
+        ),
+        form_item(
+            id="end_return_type",
             label="输出方式",
-            type="form",
-            form_type="radio_group",
-            output_key="config.returnType",
+            control="radio_group",
+            model_path="config.returnType",
             props={"options": [{"label": "结构化对象", "value": "Object"}, {"label": "纯文本", "value": "Text"}]},
-            show_expr=True,
-            required_expr=True
-        )
+            required=True,
+        ),
+        form_item(
+            id="end_content",
+            label="输出模板",
+            control="textarea",
+            model_path="config.content",
+            desc="当输出方式为纯文本时，定义最终输出模板。",
+            visible="config.returnType == 'Text'",
+            required_when="config.returnType == 'Text'",
+        ),
     ]
 )
 
@@ -115,7 +207,20 @@ BRANCH_TEMPLATE = NodeTemplate(
         outputs=[],
         config=BranchNodeConfig()
     ),
-    forms=[]
+    forms=[
+        schema_form(
+            id="branch_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义条件分支节点的输入变量。",
+        ),
+        schema_form(
+            id="branch_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义条件分支节点的输出变量。",
+        ),
+    ]
 )
 
 # ============================================================================
@@ -141,75 +246,87 @@ LOOP_TEMPLATE = NodeTemplate(
         config=LoopNodeConfig()
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="loop_inputs",
+            label="输入",
+            model_path="inputs",
+            desc="定义循环节点的输入变量。",
+        ),
+        schema_form(
+            id="loop_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义循环节点的输出变量。",
+        ),
+        form_item(
+            id="loop_type",
             label="循环模式",
             desc="按固定次数循环或遍历列表。",
-            type="form",
-            form_type="radio_group",
-            output_key="config.loopType",
+            control="radio_group",
+            model_path="config.loopType",
             props={
                 "options": [
                     {"label": "次数", "value": "count"},
                     {"label": "列表", "value": "list"},
                 ]
             },
-            show_expr=True,
-            required_expr=True,
+            required=True,
         ),
-        FormProperty(
+        form_item(
+            id="loop_count",
             label="循环次数参数",
             desc="定义循环次数，支持字面量/表达式/变量引用。",
-            type="form",
-            form_type="parameter_schema",
-            output_key="config.loopCount",
+            control="parameter_schema",
+            model_path="config.loopCount",
             props={
                 "default_schema": {"name": "loopCount", "type": "integer"},
+                "collection": False,
             },
-            show_expr="config.loopType == 'count'",
-            required_expr="config.loopType == 'count'",
-            form_role="input",
+            visible="config.loopType == 'count'",
+            required_when="config.loopType == 'count'",
+            role="input",
         ),
-        FormProperty(
+        form_item(
+            id="loop_list",
             label="循环列表参数",
             desc="定义要遍历的数组，支持变量引用。",
-            type="form",
-            form_type="parameter_schema",
-            output_key="config.loopList",
+            control="parameter_schema",
+            model_path="config.loopList",
             props={
                 "default_schema": {
                     "name": "loopList",
                     "type": "array",
                     "items": {"type": "string"},
-                }
+                },
+                "collection": False,
             },
-            show_expr="config.loopType == 'list'",
-            required_expr="config.loopType == 'list'",
-            form_role="input",
+            visible="config.loopType == 'list'",
+            required_when="config.loopType == 'list'",
+            role="input",
         ),
-        FormProperty(
+        form_item(
+            id="loop_execution_mode",
             label="执行模式",
             desc="串行执行或并发批处理。",
-            type="form",
-            form_type="radio_group",
-            output_key="config.executionMode",
+            control="radio_group",
+            model_path="config.executionMode",
             props={
                 "options": [
                     {"label": "串行", "value": "serial"},
                     {"label": "并行", "value": "parallel"},
                 ]
             },
-            show_expr=True,
-            required_expr=True,
+            required=True,
         ),
-        FormProperty(
+        form_item(
+            id="loop_max_concurrency",
             label="最大并发数",
             desc="仅在并行模式下生效，控制单次 fan-out 并发度。",
-            type="form",
-            form_type="input_number",
-            output_key="config.maxConcurrency",
+            control="input_number",
+            model_path="config.maxConcurrency",
             props={"min": 1, "step": 1},
-            show_expr="config.executionMode == 'parallel'",
-            required_expr="config.executionMode == 'parallel'",
+            visible="config.executionMode == 'parallel'",
+            required_when="config.executionMode == 'parallel'",
         ),
     ]
 )
@@ -237,29 +354,32 @@ INTERRUPT_TEMPLATE = NodeTemplate(
         config=InterruptNodeConfig(),
     ),
     forms=[
-        FormProperty(
+        schema_form(
+            id="interrupt_outputs",
+            label="输出",
+            model_path="outputs",
+            desc="定义恢复执行后输出的变量结构。",
+        ),
+        form_item(
+            id="interrupt_reason",
             label="中断原因",
-            type="form",
-            form_type="input",
-            output_key="config.reason",
-            show_expr=True,
-            required_expr=True,
+            control="input",
+            model_path="config.reason",
+            required=True,
         ),
-        FormProperty(
+        form_item(
+            id="interrupt_message",
             label="提示信息",
-            type="form",
-            form_type="textarea",
-            output_key="config.message",
-            show_expr=True,
-            required_expr=True,
+            control="textarea",
+            model_path="config.message",
+            required=True,
         ),
-        FormProperty(
+        form_item(
+            id="interrupt_resume_output_key",
             label="恢复输出键",
-            type="form",
-            form_type="input",
-            output_key="config.resume_output_key",
-            show_expr=True,
-            required_expr=True,
+            control="input",
+            model_path="config.resume_output_key",
+            required=True,
         ),
     ],
 )

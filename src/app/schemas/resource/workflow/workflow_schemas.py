@@ -8,6 +8,7 @@ from app.schemas.resource.runtime_checkpoint import RuntimeCheckpointEnvelopeRea
 from app.engine.workflow import (
     NodeResultData, ParameterSchema
 )
+from app.engine.schemas.form_schema import FormProperty
 from app.schemas.common import SSEvent, ExecutionRequest, ExecutionResponse
 from app.models.resource.workflow import (
     Workflow,
@@ -65,7 +66,7 @@ class WorkflowNodeDefRead(BaseModel):
     description: Optional[str]
     display_order: int
     node: Dict[str, Any] # WorkflowNode 结构
-    forms: List[Dict[str, Any]] # FormProperty 结构
+    forms: List[FormProperty]
     is_active: bool
     
     model_config = ConfigDict(from_attributes=True)
