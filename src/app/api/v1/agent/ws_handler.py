@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 from ag_ui.core import EventType, RunErrorEvent
@@ -23,6 +23,7 @@ class AgentSessionHandler:
         self.auth_context = auth_context
         self.current_task: Optional[asyncio.Task] = None
         self.current_run_id: Optional[str] = None
+        self.current_detach: Optional[Callable[[], None]] = None
 
     async def run(self):
         await self.websocket.accept()
@@ -33,6 +34,8 @@ class AgentSessionHandler:
                 await self._dispatch(text)
         except WebSocketDisconnect:
             logger.info("AG-UI websocket disconnected: %s", self.user.uuid)
+            if callable(self.current_detach):
+                self.current_detach()
             cancel_on_close = False
         finally:
             if cancel_on_close:
@@ -157,6 +160,7 @@ class AgentSessionHandler:
         if self.current_task is task:
             self.current_task = None
             self.current_run_id = None
+            self.current_detach = None
 
     async def _cancel_current_task(self):
         if self.current_task and not self.current_task.done():
@@ -187,6 +191,7 @@ class AgentSessionHandler:
                 run_result = await service.async_execute(agent_uuid, run_input, self.user)
                 cancel_fn = getattr(run_result, "cancel", None)
                 self.current_run_id = getattr(run_result, "run_id", None)
+                self.current_detach = getattr(run_result, "detach", None)
                 async for event in run_result.generator:
                     await self._send_event(event)
             except ActiveRunExistsError as exc:

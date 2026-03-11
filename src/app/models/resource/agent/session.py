@@ -1,6 +1,6 @@
 # src/app/models/resource/agent/session.py
 
-from sqlalchemy import Column, Integer, String, Text, JSON, Enum, ForeignKey, DateTime, func, Boolean
+from sqlalchemy import Column, Integer, String, Text, JSON, Enum, ForeignKey, DateTime, func, Boolean, Index
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 from app.utils.id_generator import generate_uuid
@@ -90,3 +90,12 @@ class AgentMessage(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     session = relationship("AgentSession", back_populates="messages")
+
+    __table_args__ = (
+        Index(
+            "ix_ai_chat_messages_session_deleted_turn",
+            "session_id",
+            "is_deleted",
+            "turn_id",
+        ),
+    )

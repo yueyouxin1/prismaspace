@@ -153,12 +153,14 @@ async def stream_agent(
     async def sse_generator():
         run_result = None
         cancel_fn = None
+        detach_fn = None
         detached = False
         thread_id = request.thread_id
         run_id = request.run_id
         try:
             run_result = await service.async_execute(uuid, request, context.actor)
             cancel_fn = getattr(run_result, "cancel", None)
+            detach_fn = getattr(run_result, "detach", None)
             thread_id = getattr(run_result, "thread_id", None) or thread_id
             run_id = getattr(run_result, "run_id", run_id)
             async for event in run_result.generator:
@@ -177,6 +179,8 @@ async def stream_agent(
             )
         except GeneratorExit:
             detached = True
+            if callable(detach_fn):
+                detach_fn()
             raise
         except ServiceException as exc:
             yield _encode(

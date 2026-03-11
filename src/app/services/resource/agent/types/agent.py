@@ -30,6 +30,7 @@ class AgentRunResult:
     trace_id: Optional[str]
     thread_id: str
     cancel: Optional[Callable[[], None]] = None
+    detach: Optional[Callable[[], None]] = None
     task: Optional[Task[Any]] = None
 
 

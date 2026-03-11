@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -51,3 +51,15 @@ class ResourceExecution(Base):
 
     resource_instance = relationship("ResourceInstance")
     user = relationship("User")
+
+    __table_args__ = (
+        Index(
+            "ix_resource_executions_active_lookup",
+            "resource_instance_id",
+            "user_id",
+            "thread_id",
+            "status",
+            "created_at",
+            "id",
+        ),
+    )

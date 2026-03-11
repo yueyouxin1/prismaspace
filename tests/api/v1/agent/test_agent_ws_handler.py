@@ -64,10 +64,13 @@ async def test_websocket_disconnect_does_not_cancel_background_run(monkeypatch):
     )
     handler = AgentSessionHandler(websocket, SimpleNamespace(user=SimpleNamespace(uuid="user-1")))
     handler._cancel_current_task = AsyncMock()
+    detached = {"value": False}
+    handler.current_detach = lambda: detached.__setitem__("value", True)
 
     await handler.run()
 
     handler._cancel_current_task.assert_not_awaited()
+    assert detached["value"] is True
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,7 @@ class AgentRunExecutionService:
         adapted=None,
         tool_executor=None,
         agent_instance: Optional[Agent] = None,
+        live_event_buffer=None,
     ) -> None:
         service = self.agent_service
         callbacks: Optional[PersistingAgentCallbacks] = None
@@ -69,7 +70,7 @@ class AgentRunExecutionService:
                     message_ids=message_ids,
                     interrupt_id_builder=service.build_interrupt_id,
                     cancel_checker=lambda: service._should_cancel_run(execution.run_id),
-                    event_sink=lambda payload: service.live_event_service.record_event(execution.run_id, payload),
+                    event_sink=live_event_buffer.publish if live_event_buffer is not None else None,
                 )
 
                 if adapted is None or tool_executor is None or agent_instance is None:
@@ -302,4 +303,6 @@ class AgentRunExecutionService:
             )
             await service._clear_cancel_run(execution.run_id)
         finally:
+            if live_event_buffer is not None:
+                await live_event_buffer.aclose()
             await generator_manager.aclose(force=False)

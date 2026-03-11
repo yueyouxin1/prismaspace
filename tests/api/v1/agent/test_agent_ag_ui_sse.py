@@ -123,6 +123,7 @@ async def test_stream_agent_route_wraps_service_exception_to_run_error(monkeypat
 @pytest.mark.asyncio
 async def test_stream_agent_disconnect_does_not_cancel_background_run(monkeypatch):
     cancelled = {"value": False}
+    detached = {"value": False}
 
     class _FakeAgentService:
         def __init__(self, context):
@@ -139,7 +140,10 @@ async def test_stream_agent_disconnect_does_not_cancel_background_run(monkeypatc
                 cancelled["value"] = True
                 task.cancel()
 
-            return SimpleNamespace(generator=_gen(), cancel=_cancel, task=task, thread_id="thread-x", run_id="run-x")
+            def _detach():
+                detached["value"] = True
+
+            return SimpleNamespace(generator=_gen(), cancel=_cancel, detach=_detach, task=task, thread_id="thread-x", run_id="run-x")
 
     monkeypatch.setattr(agent_api, "AgentService", _FakeAgentService)
 
@@ -152,6 +156,7 @@ async def test_stream_agent_disconnect_does_not_cancel_background_run(monkeypatc
     await response.body_iterator.aclose()
 
     assert cancelled["value"] is False
+    assert detached["value"] is True
 
 
 @pytest.mark.asyncio

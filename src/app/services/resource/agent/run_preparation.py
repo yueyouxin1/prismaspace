@@ -155,6 +155,7 @@ class AgentRunPreparationService:
                 }
             )
             message_ids = service._build_stream_message_ids()
+            live_event_buffer = service.live_event_service.create_buffer(execution.run_id)
 
             session_manager: Optional[AgentSessionManager] = None
             if session_thread_id and session_mode != "stateless":
@@ -188,19 +189,6 @@ class AgentRunPreparationService:
                 await service.db.commit()
                 raise ServiceException(error_message)
 
-            await service._upsert_run_checkpoint(
-                execution=execution,
-                agent_instance=instance,
-                session=session_manager.session if session_manager and session_manager.session else None,
-                thread_id=requested_thread_id,
-                turn_id=turn_id,
-                checkpoint_kind="prepared",
-                run_input=canonical_run_input,
-                adapted=adapted,
-                runtime_snapshot={},
-                pending_client_tool_calls=[],
-            )
-
             trace_manager = TraceManager(
                 db=service.db,
                 operation_name="agent.run",
@@ -218,6 +206,7 @@ class AgentRunPreparationService:
                     turn_id=turn_id,
                     trace_id=trace_id,
                     thread_id=requested_thread_id,
+                    detach=live_event_buffer.detach,
                 ),
                 background_task_kwargs={
                     "agent_config": agent_config,
@@ -234,6 +223,7 @@ class AgentRunPreparationService:
                     "adapted": adapted,
                     "tool_executor": tool_executor,
                     "agent_instance": instance,
+                    "live_event_buffer": live_event_buffer,
                 },
             )
         except Exception as exc:
