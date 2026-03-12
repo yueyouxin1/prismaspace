@@ -15,8 +15,7 @@ def form_item(
     desc: Optional[str] = None,
     props: Optional[dict] = None,
     role: str = "default",
-    required: Optional[bool] = None,
-    required_when=None,
+    required: bool | str = False,
     visible=True,
     disabled=False,
 ) -> FormProperty:
@@ -30,7 +29,6 @@ def form_item(
         props=props or {},
         role=role,
         required=required,
-        required_when=required_when,
         state={"visible": visible, "disabled": disabled},
     )
 
@@ -126,7 +124,7 @@ OUTPUT_TEMPLATE = NodeTemplate(
             model_path="config.content",
             desc="当输出方式为纯文本时，定义最终输出模板。",
             visible="config.returnType == 'Text'",
-            required_when="config.returnType == 'Text'",
+            required="config.returnType == 'Text'",
         ),
     ]
 )
@@ -164,7 +162,7 @@ END_TEMPLATE = NodeTemplate(
             model_path="config.content",
             desc="当输出方式为纯文本时，定义最终输出模板。",
             visible="config.returnType == 'Text'",
-            required_when="config.returnType == 'Text'",
+            required="config.returnType == 'Text'",
         ),
     ]
 )
@@ -277,7 +275,7 @@ LOOP_TEMPLATE = NodeTemplate(
                 "collection": False,
             },
             visible="config.loopType == 'count'",
-            required_when="config.loopType == 'count'",
+            required="config.loopType == 'count'",
             role="input",
         ),
         form_item(
@@ -295,7 +293,7 @@ LOOP_TEMPLATE = NodeTemplate(
                 "collection": False,
             },
             visible="config.loopType == 'list'",
-            required_when="config.loopType == 'list'",
+            required="config.loopType == 'list'",
             role="input",
         ),
         form_item(
@@ -320,7 +318,7 @@ LOOP_TEMPLATE = NodeTemplate(
             model_path="config.maxConcurrency",
             props={"min": 1, "step": 1},
             visible="config.executionMode == 'parallel'",
-            required_when="config.executionMode == 'parallel'",
+            required="config.executionMode == 'parallel'",
         ),
     ]
 )

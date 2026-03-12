@@ -28,8 +28,7 @@ class FormProperty(BaseModel):
 
     # generator 契约字段
     state: Dict[str, Any] = Field(default_factory=dict, description="显隐/禁用等状态，与前端 generator state 对齐")
-    required: Optional[bool] = Field(default=None, description="静态必填")
-    required_when: Union[str, bool, None] = Field(default=None, description="动态必填条件，与前端 generator requiredWhen 对齐")
+    required: Union[str, bool, None] = Field(default=False, description="必填条件，支持布尔或表达式字符串")
     role: Optional[str] = Field(default='default', description="表单角色，与前端 generator role 对齐")
 
     # action 契约
@@ -51,6 +50,9 @@ class FormProperty(BaseModel):
         if 'disabled' not in state:
             state['disabled'] = False
         self.state = state
+
+        if self.required is None:
+            self.required = False
 
         if self.type == 'action' and not self.action_type:
             self.action_type = 'button'

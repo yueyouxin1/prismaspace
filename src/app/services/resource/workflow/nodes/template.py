@@ -17,8 +17,7 @@ def form_item(
     desc: Optional[str] = None,
     props: Optional[dict] = None,
     role: str = "default",
-    required: Optional[bool] = None,
-    required_when=None,
+    required: bool | str = False,
     visible=True,
     disabled=False,
 ) -> FormProperty:
@@ -32,7 +31,6 @@ def form_item(
         props=props or {},
         role=role,
         required=required,
-        required_when=required_when,
         state={"visible": visible, "disabled": disabled},
     )
 
