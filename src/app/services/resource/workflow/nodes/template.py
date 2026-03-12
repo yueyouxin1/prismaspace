@@ -28,18 +28,12 @@ def form_item(
         desc=desc,
         type="form",
         control=control,
-        form_type=control,
         model_path=model_path,
-        output_key=model_path,
         props=props or {},
         role=role,
-        form_role=role,
         required=required,
         required_when=required_when,
         state={"visible": visible, "disabled": disabled},
-        show_expr=visible,
-        disabled_expr=disabled,
-        required_expr=required_when if required_when is not None else required,
     )
 
 

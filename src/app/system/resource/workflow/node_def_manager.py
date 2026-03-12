@@ -1,7 +1,8 @@
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from app.services.resource.workflow import nodes # 触发 import 注册
+from app.engine.workflow import nodes as engine_nodes  # 触发基础节点模板注册
+from app.services.resource.workflow import nodes as service_nodes  # 触发资源节点模板注册
 from app.models.resource.workflow import WorkflowNodeDef
 from app.engine.workflow.registry import default_node_registry
 

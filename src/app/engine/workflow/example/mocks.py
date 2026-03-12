@@ -10,6 +10,35 @@ from ...utils.stream import StreamBroadcaster
 from ...schemas.parameter_schema import ParameterSchema 
 from ...schemas.form_schema import FormProperty
 
+
+def form_item(
+    *,
+    id: str,
+    label: str,
+    control: str,
+    model_path: str,
+    desc: str | None = None,
+    props: dict | None = None,
+    role: str = "default",
+    required: bool | None = None,
+    required_when=None,
+    visible=True,
+    disabled=False,
+) -> FormProperty:
+    return FormProperty(
+        id=id,
+        label=label,
+        desc=desc,
+        type="form",
+        control=control,
+        model_path=model_path,
+        props=props or {},
+        role=role,
+        required=required,
+        required_when=required_when,
+        state={"visible": visible, "disabled": disabled},
+    )
+
 # --- 权威定义该节点的配置结构 ---
 class LLMNodeConfig(BaseNodeConfig):
     model: str = Field(..., description="模型名称，如 gpt-4")
@@ -37,29 +66,26 @@ MockLLM_TEMPLATE = NodeTemplate(
     
     # UI 表单定义
     forms=[
-        FormProperty(
+        form_item(
+            id="mock_llm_model",
             label="模型名称",
-            type="form",
-            form_type="model_selector",
-            output_key="config.model",
+            control="model_selector",
+            model_path="config.model",
             props={"type": "llm"},
-            show_expr=True
         ),
-        FormProperty(
+        form_item(
+            id="mock_llm_system_prompt",
             label="系统提示词",
-            type="form",
-            form_type="textarea",
-            output_key="config.system_prompt",
-            show_expr=True
+            control="textarea",
+            model_path="config.system_prompt",
         ),
-        FormProperty(
+        form_item(
+            id="mock_llm_temperature",
             label="随机性",
-            type="form",
-            form_type="slider",
-            output_key="config.temperature",
+            control="slider",
+            model_path="config.temperature",
             props={"min": 0, "max": 1, "step": 0.1},
-            show_expr=True
-        )
+        ),
     ]
 )
 
