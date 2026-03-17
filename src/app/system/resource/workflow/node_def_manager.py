@@ -22,9 +22,7 @@ class NodeDefManager:
             
             # 1. 序列化 node (Payload)
             node_data_json = template.data.model_dump(mode='json', exclude_none=True)
-            
-            # 2. 序列化表单定义
-            forms_data = [f.model_dump(mode='json', exclude_none=True) for f in template.forms]
+            forms_data = []
             
             # 3. Upsert
             stmt = insert(WorkflowNodeDef).values(

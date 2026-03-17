@@ -4,8 +4,6 @@ from typing import List, Dict, Any, Optional, Union, Literal, NamedTuple
 from pydantic import BaseModel, Field, ConfigDict
 
 from ..schemas.parameter_schema import ParameterSchema, ParameterValue
-from ..schemas.form_schema import FormProperty
-
 # ============================================================================
 # 1. 权威状态定义 (Authoritative Status Definitions)
 # ============================================================================
@@ -197,10 +195,6 @@ class NodeTemplate(BaseModel):
     
     # --- 核心预设数据 (The Payload) ---
     data: NodeData = Field(..., description="预设节点数据")
-
-    # --- 编辑器元数据 ---
-    # 定义了如何渲染 node_data.config 的表单
-    forms: List[FormProperty] = Field(default_factory=list, description="节点的配置表单定义")
     
     is_active: bool = Field(True)
     
@@ -208,4 +202,4 @@ class NodeTemplate(BaseModel):
     def registry_id(self) -> str:
         return self.data.registryId
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='ignore')

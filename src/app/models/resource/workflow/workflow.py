@@ -45,7 +45,7 @@ class WorkflowNodeDef(Base):
     
     data = Column(JSON, nullable=False, comment="节点的预设数据结构 (NodeData)")
     
-    # [核心] 对应 NodeTemplate.forms
-    forms = Column(JSON, nullable=False, comment="节点的 UI 表单定义")
+    # [Deprecated] 历史上用于承载后端 forms 契约；当前仅保留空数组兼容旧表结构。
+    forms = Column(JSON, nullable=False, default=list, comment="Deprecated: legacy node form metadata")
     
     is_active = Column(Boolean, default=True)

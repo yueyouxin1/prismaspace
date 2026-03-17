@@ -8,7 +8,6 @@ from app.schemas.resource.runtime_checkpoint import RuntimeCheckpointEnvelopeRea
 from app.engine.workflow import (
     NodeResultData, ParameterSchema
 )
-from app.engine.schemas.form_schema import FormProperty
 from app.schemas.common import SSEvent, ExecutionRequest, ExecutionResponse
 from app.models.resource.workflow import (
     Workflow,
@@ -66,7 +65,6 @@ class WorkflowNodeDefRead(BaseModel):
     description: Optional[str]
     display_order: int
     node: Dict[str, Any] # WorkflowNode 结构
-    forms: List[FormProperty]
     is_active: bool
     
     model_config = ConfigDict(from_attributes=True)
@@ -85,7 +83,6 @@ class WorkflowNodeDefRead(BaseModel):
                 "description": node_payload.get("description"),
                 "display_order": data.display_order,
                 "node": node_payload,
-                "forms": data.forms or [],
                 "is_active": data.is_active,
             }
         if isinstance(data, dict) and "registry_id" in data and "node_uid" not in data:
@@ -99,7 +96,6 @@ class WorkflowNodeDefRead(BaseModel):
                 "description": node_payload.get("description"),
                 "display_order": data.get("display_order", 0),
                 "node": node_payload,
-                "forms": data.get("forms") or [],
                 "is_active": bool(data.get("is_active", True)),
             }
         return data

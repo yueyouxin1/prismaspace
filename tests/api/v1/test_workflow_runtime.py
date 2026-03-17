@@ -92,8 +92,7 @@ class TestWorkflowRuntimeApi:
         assert isinstance(first["node"], dict)
         loop_node = next((item for item in nodes if item["node_uid"] == "Loop"), None)
         assert loop_node is not None
-        assert isinstance(loop_node["forms"], list)
-        assert any(form.get("output_key") == "config.loopType" for form in loop_node["forms"])
+        assert "forms" not in loop_node
 
     async def test_update_validate_execute_workflow_instance(
         self,
@@ -186,6 +185,114 @@ class TestWorkflowRuntimeApi:
         assert run_payload["workflow_instance_uuid"] == instance_uuid
         assert run_payload["latest_checkpoint"] is not None
         assert len(run_payload["node_executions"]) >= 2
+
+    async def test_start_end_minimal_flow_maps_workflow_input_to_output(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [
+                                {
+                                    "name": "message",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                }
+                            ],
+                            "config": {},
+                        },
+                        "position": {"x": 100, "y": 200},
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "message"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object", "stream": False},
+                        },
+                        "position": {"x": 420, "y": 200},
+                    },
+                ],
+                "edges": [
+                    {
+                        "sourceNodeID": "start",
+                        "targetNodeID": "end",
+                        "sourcePortID": "0",
+                        "targetPortID": "0",
+                    }
+                ],
+                "viewport": {"x": 0, "y": 0, "zoom": 1},
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+        updated = update_response.json()["data"]
+        assert len(updated["inputs_schema"]) == 1
+        assert updated["inputs_schema"][0]["name"] == "message"
+        assert updated["inputs_schema"][0]["type"] == "string"
+        assert updated["inputs_schema"][0]["required"] is True
+        assert updated["inputs_schema"][0]["open"] is True
+
+        assert len(updated["outputs_schema"]) == 1
+        assert updated["outputs_schema"][0]["name"] == "result"
+        assert updated["outputs_schema"][0]["type"] == "string"
+        assert updated["outputs_schema"][0]["required"] is True
+        assert updated["outputs_schema"][0]["open"] is True
+        assert updated["outputs_schema"][0]["value"] == {
+            "type": "ref",
+            "content": {"blockID": "start", "path": "message"},
+        }
+
+        validate_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/validate",
+            headers=headers,
+        )
+        assert validate_response.status_code == status.HTTP_200_OK, validate_response.text
+        validation = validate_response.json()["data"]
+        assert validation["is_valid"] is True
+        assert validation["errors"] == []
+
+        execute_response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/execute",
+            json={"inputs": {"message": "hello workflow"}},
+            headers=headers,
+        )
+        assert execute_response.status_code == status.HTTP_200_OK, execute_response.text
+        execute_payload = execute_response.json()["data"]["data"]
+        assert execute_payload["output"] == {"result": "hello workflow"}
+        assert execute_payload["content"] is None
 
     async def test_reject_invalid_workflow_graph_with_cycle(
         self,

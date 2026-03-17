@@ -8,34 +8,6 @@ from ..registry import register_node, BaseNode
 from ...utils.parameter_schema_utils import schemas2obj
 from ...utils.stream import StreamBroadcaster
 from ...schemas.parameter_schema import ParameterSchema 
-from ...schemas.form_schema import FormProperty
-
-
-def form_item(
-    *,
-    id: str,
-    label: str,
-    control: str,
-    model_path: str,
-    desc: str | None = None,
-    props: dict | None = None,
-    role: str = "default",
-    required: bool | str = False,
-    visible=True,
-    disabled=False,
-) -> FormProperty:
-    return FormProperty(
-        id=id,
-        label=label,
-        desc=desc,
-        type="form",
-        control=control,
-        model_path=model_path,
-        props=props or {},
-        role=role,
-        required=required,
-        state={"visible": visible, "disabled": disabled},
-    )
 
 # --- 权威定义该节点的配置结构 ---
 class LLMNodeConfig(BaseNodeConfig):
@@ -60,31 +32,7 @@ MockLLM_TEMPLATE = NodeTemplate(
         outputs=[ParameterSchema(name="text", type="string", label="生成结果")],
         # 预设配置 (使用 Config 类的默认值)
         config=LLMNodeConfig(model="gpt-4o")
-    ),
-    
-    # UI 表单定义
-    forms=[
-        form_item(
-            id="mock_llm_model",
-            label="模型名称",
-            control="model_selector",
-            model_path="config.model",
-            props={"type": "llm"},
-        ),
-        form_item(
-            id="mock_llm_system_prompt",
-            label="系统提示词",
-            control="textarea",
-            model_path="config.system_prompt",
-        ),
-        form_item(
-            id="mock_llm_temperature",
-            label="随机性",
-            control="slider",
-            model_path="config.temperature",
-            props={"min": 0, "max": 1, "step": 0.1},
-        ),
-    ]
+    )
 )
 
 @register_node(template=MockLLM_TEMPLATE)
@@ -205,8 +153,7 @@ FAIL_TEMPLATE = NodeTemplate(
         description="FailNode",
         inputs=[],
         outputs=[]
-    ),
-    forms=[]
+    )
 )
 
 @register_node(template=FAIL_TEMPLATE)
@@ -224,8 +171,7 @@ UNSTABLEWORKER_TEMPLATE = NodeTemplate(
         description="UnstableWorker",
         inputs=[],
         outputs=[]
-    ),
-    forms=[]
+    )
 )
 
 @register_node(template=UNSTABLEWORKER_TEMPLATE)
