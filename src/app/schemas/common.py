@@ -21,11 +21,17 @@ class MsgResponse(BaseModel):
 
 class SSEvent(BaseModel):
     """运行时产生的原子事件"""
+    id: Optional[str] = None
     event: str
     data: Dict[str, Any]
     
     def to_sse(self) -> str:
-        return f"event: {self.event}\ndata: {json.dumps(self.data, ensure_ascii=False)}\n\n"
+        parts = []
+        if self.id:
+            parts.append(f"id: {self.id}")
+        parts.append(f"event: {self.event}")
+        parts.append(f"data: {json.dumps(self.data, ensure_ascii=False)}")
+        return "\n".join(parts) + "\n\n"
 
 class ExecutionRequest(BaseModel):
     """

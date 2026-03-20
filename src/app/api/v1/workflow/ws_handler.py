@@ -20,6 +20,9 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
     def __init__(self, websocket, auth_context):
         super().__init__(websocket, auth_context)
         self.current_task: Optional[asyncio.Task] = None
+        self.current_run_id: Optional[str] = None
+        self.current_detach = None
+        self.current_cancel = None
 
     async def action_run(self, packet: WSPacket):
         """
@@ -36,6 +39,9 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
         def cleanup(t):
             if self.current_task == t:
                 self.current_task = None
+                self.current_run_id = None
+                self.current_detach = None
+                self.current_cancel = None
         self.current_task.add_done_callback(cleanup)
 
     async def action_stop(self, packet: WSPacket):
@@ -46,9 +52,12 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
             await self.send("stopped", {"message": "Execution stopped by user"}, packet.request_id)
 
     async def on_disconnect(self):
-        await self._cancel_current_task()
+        if callable(self.current_detach):
+            self.current_detach()
 
     async def _cancel_current_task(self):
+        if callable(self.current_cancel):
+            self.current_cancel()
         if self.current_task and not self.current_task.done():
             self.current_task.cancel()
             try:
@@ -59,6 +68,9 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
                 logger.error(f"Error during task cancellation: {e}")
             finally:
                 self.current_task = None
+                self.current_run_id = None
+                self.current_detach = None
+                self.current_cancel = None
 
     async def _run_workflow_stream(self, packet: WSPacket):
         request_id = packet.request_id
@@ -93,6 +105,9 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
                 # 获取生成器
                 result = await service.async_execute(instance_uuid, request, self.user)
                 generator = result.generator
+                self.current_run_id = result.run_id
+                self.current_detach = getattr(result, "detach", None)
+                self.current_cancel = getattr(result, "cancel", None)
                 
                 # 执行流式生成
                 try:
@@ -105,7 +120,6 @@ class WorkflowSessionHandler(BaseWebSocketHandler):
                         )
                 finally:
                     if result.task and not result.task.done():
-                        result.task.cancel()
                         try:
                             await result.task
                         except Exception:

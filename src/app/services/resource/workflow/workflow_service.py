@@ -48,6 +48,7 @@ from app.services.resource.workflow.runtime_persistence import (
     WorkflowRuntimePersistenceService,
 )
 from app.services.resource.workflow.event_log_service import WorkflowEventLogService
+from app.services.resource.workflow.live_events import WorkflowLiveEventService
 from app.services.resource.workflow.runtime_runner import WorkflowRuntimeRunner
 from app.services.resource.workflow.runtime_registry import WorkflowTaskRegistry
 from app.services.resource.workflow.types.workflow import PreparedWorkflowRun, WorkflowRunResult
@@ -101,9 +102,21 @@ class WorkflowStreamCallbacks(WorkflowCallbacks):
         self.run_id = run_id
         self.thread_id = thread_id
         self.event_persister = event_persister
+        self.live_event_buffer = None
+
+    def bind_live_event_buffer(self, live_event_buffer) -> None:
+        self.live_event_buffer = live_event_buffer
 
     async def _safe_put(self, event: WorkflowEvent):
         try:
+            if self.live_event_buffer is not None:
+                envelope = await self.live_event_buffer.publish(
+                    {
+                        "event": event.event,
+                        "data": event.data,
+                    }
+                )
+                event.id = str(envelope["seq"])
             if self.event_persister is not None:
                 await self.event_persister(event.event, event.data)
             self.generator_manager.put_nowait(event)
@@ -169,6 +182,7 @@ class WorkflowService(ResourceImplementationService):
         self.execution_ledger_service = ExecutionLedgerService(context)
         self.runtime_persistence = WorkflowRuntimePersistenceService(context)
         self.event_log_service = WorkflowEventLogService(context)
+        self.live_event_service = WorkflowLiveEventService(context)
         self.runtime_compiler = WorkflowRuntimeCompiler()
         self._db_session_factory = context.db_session_factory or SessionLocal
 
@@ -891,6 +905,8 @@ class WorkflowService(ResourceImplementationService):
                     workflow_instance=prepared["workflow_instance"],
                 ),
             )
+            live_event_buffer = self.live_event_service.create_buffer(prepared["execution"].run_id)
+            callbacks.bind_live_event_buffer(live_event_buffer)
 
             return PreparedWorkflowRun(
                 result=WorkflowRunResult(
@@ -898,6 +914,7 @@ class WorkflowService(ResourceImplementationService):
                     trace_id=prepared["trace_id"],
                     run_id=prepared["execution"].run_id,
                     thread_id=prepared["execution"].thread_id,
+                    detach=live_event_buffer.detach,
                 ),
                 background_task_kwargs={
                     "execution": prepared["execution"],
@@ -910,6 +927,7 @@ class WorkflowService(ResourceImplementationService):
                     "external_context": prepared["external_context"],
                     "trace_id": prepared["trace_id"],
                     "actor": actor,
+                    "live_event_buffer": live_event_buffer,
                 },
             )
         except Exception:
@@ -938,6 +956,7 @@ class WorkflowService(ResourceImplementationService):
         external_context: ExternalContext,
         trace_id: str,
         actor: User,
+        live_event_buffer=None,
     ) -> None:
         tracing_interceptor = WorkflowTraceInterceptor(
             db=self.db,
@@ -1005,6 +1024,15 @@ class WorkflowService(ResourceImplementationService):
                 error_message="Operation cancelled.",
             )
             await self.db.commit()
+            await callbacks.on_event(
+                "finish",
+                {
+                    "output": {},
+                    "outcome": "cancelled",
+                    "run_id": execution.run_id,
+                    "thread_id": execution.thread_id,
+                },
+            )
             raise
         except Exception as exc:
             logger.error("Workflow execution error: %s", exc, exc_info=True)
@@ -1020,6 +1048,8 @@ class WorkflowService(ResourceImplementationService):
             await self.db.commit()
         finally:
             WorkflowTaskRegistry.unregister(execution.run_id)
+            if live_event_buffer is not None:
+                await live_event_buffer.aclose()
             await generator_manager.aclose(force=False)
 
     async def execute_precreated_run(
@@ -1049,6 +1079,9 @@ class WorkflowService(ResourceImplementationService):
                 workflow_instance=prepared["workflow_instance"],
             ),
         )
+        live_event_buffer = self.live_event_service.create_buffer(prepared["execution"].run_id)
+        live_event_buffer.detach()
+        callbacks.bind_live_event_buffer(live_event_buffer)
         await self._run_workflow_background_task(
             execution=prepared["execution"],
             workflow_instance=prepared["workflow_instance"],
@@ -1060,6 +1093,7 @@ class WorkflowService(ResourceImplementationService):
             external_context=prepared["external_context"],
             trace_id=prepared["trace_id"],
             actor=actor,
+            live_event_buffer=live_event_buffer,
         )
 
     async def _prepare_run_context(
@@ -1258,6 +1292,27 @@ class WorkflowService(ResourceImplementationService):
             execution_id=execution.id,
             limit=limit,
         )
+
+    async def stream_live_run_events(
+        self,
+        run_id: str,
+        *,
+        after_seq: int = 0,
+    ):
+        execution = await self.execution_ledger_service.get_by_run_id(run_id)
+        if execution is None:
+            raise NotFoundError("Workflow run not found.")
+
+        workflow_stub = await self.dao.get_by_pk(execution.resource_instance_id)
+        if workflow_stub is None:
+            raise NotFoundError("Workflow instance not found.")
+        workflow_instance = await self.get_by_uuid(workflow_stub.uuid)
+        if workflow_instance is None:
+            raise NotFoundError("Workflow instance not found.")
+        await self._check_execute_perm(workflow_instance)
+
+        async for envelope in self.live_event_service.stream_events(run_id, after_seq=after_seq):
+            yield envelope
 
     async def list_runs(
         self,

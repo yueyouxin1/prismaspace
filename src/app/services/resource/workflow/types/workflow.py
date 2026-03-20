@@ -11,6 +11,7 @@ class WorkflowRunResult:
     thread_id: str
     task: Optional[Task[Any]] = None
     cancel: Optional[Callable[[], None]] = None
+    detach: Optional[Callable[[], None]] = None
 
 
 @dataclass

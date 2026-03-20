@@ -1,5 +1,7 @@
 # src/app/api/v1/workflow.py
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Body, status, HTTPException, WebSocket
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any
@@ -87,13 +89,26 @@ async def stream_workflow(
     service = WorkflowService(context)
     
     async def sse_generator():
+        result = None
+        detach_fn = None
+        detached = False
         result = await service.async_execute(uuid, request, context.actor)
+        detach_fn = getattr(result, "detach", None)
         try:
             async for event in result.generator:
                 yield event.to_sse()
+        except GeneratorExit:
+            detached = True
+            if callable(detach_fn):
+                detach_fn()
+            raise
+        except asyncio.CancelledError:
+            detached = True
+            if callable(detach_fn):
+                detach_fn()
+            raise
         finally:
-            if result.task and not result.task.done():
-                result.task.cancel()
+            if result and result.task and not detached:
                 try:
                     await result.task
                 except Exception:
@@ -171,6 +186,37 @@ async def replay_workflow_run_events(
         events = await service.list_run_events(run_id, limit=limit)
         for event in events:
             yield WorkflowEvent(event=event.event_type, data=event.payload).to_sse()
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/runs/{run_id}/live", summary="Attach To Live Workflow Events")
+async def stream_live_workflow_run_events(
+    run_id: str,
+    after_seq: int = 0,
+    context: AppContext = AuthContextDep,
+):
+    service = WorkflowService(context)
+
+    async def sse_generator():
+        async for envelope in service.stream_live_run_events(run_id, after_seq=after_seq):
+            payload = envelope.get("payload", {})
+            seq = envelope.get("seq")
+            event_name = str(payload.get("event", "message"))
+            data = payload.get("data", {})
+            yield WorkflowEvent(
+                id=str(seq) if seq is not None else None,
+                event=event_name,
+                data=data if isinstance(data, dict) else {"value": data},
+            ).to_sse()
 
     return StreamingResponse(
         sse_generator(),

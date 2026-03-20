@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 import pytest
@@ -29,6 +30,10 @@ class _FlakyResumeConfig(BaseNodeConfig):
     pass
 
 
+class _SlowLiveConfig(BaseNodeConfig):
+    pass
+
+
 FLAKY_RESUME_TEMPLATE = NodeTemplate(
     category=NodeCategory.CUSTOM,
     icon="refresh-cw",
@@ -39,6 +44,32 @@ FLAKY_RESUME_TEMPLATE = NodeTemplate(
         inputs=[],
         outputs=[ParameterSchema(name="value", type="string")],
         config=_FlakyResumeConfig(),
+    ),
+    forms=[],
+)
+
+
+SLOW_LIVE_TEMPLATE = NodeTemplate(
+    category=NodeCategory.CUSTOM,
+    icon="clock-3",
+    data=NodeData(
+        registryId="TestSlowLiveNode",
+        name="Test Slow Live Node",
+        description="Sleep briefly so live attach can reconnect by run_id.",
+        inputs=[
+            ParameterSchema(
+                name="item",
+                type="string",
+                value={
+                    "type": "ref",
+                    "content": {"blockID": "start", "path": "item"},
+                },
+                required=True,
+                open=True,
+            )
+        ],
+        outputs=[ParameterSchema(name="value", type="string", required=True, open=True)],
+        config=_SlowLiveConfig(),
     ),
     forms=[],
 )
@@ -57,6 +88,17 @@ class FlakyResumeNode(BaseNode):
         return NodeExecutionResult(
             input=node_input,
             data=NodeResultData(output={"value": f"recovered:{item}"}),
+        )
+
+
+@register_node(template=SLOW_LIVE_TEMPLATE)
+class SlowLiveNode(BaseNode):
+    async def execute(self) -> NodeExecutionResult:
+        node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        await asyncio.sleep(0.2)
+        return NodeExecutionResult(
+            input=node_input,
+            data=NodeResultData(output={"value": f"live:{node_input.get('item', '')}"}),
         )
 
 
@@ -182,3 +224,113 @@ async def test_workflow_run_can_resume_from_latest_checkpoint(
     assert resumed_detail.parent_run_id == failed_run.run_id
     assert resumed_detail.thread_id == failed_run.thread_id
     assert resumed_detail.can_resume is False
+
+
+async def test_workflow_run_supports_run_id_live_attach_after_detach(
+    created_resource_factory,
+    app_context_factory,
+    registered_user_with_pro: UserContext,
+):
+    resource = await created_resource_factory("workflow")
+    actor = registered_user_with_pro.user
+    context = await app_context_factory(actor)
+    service = WorkflowService(context)
+
+    instance = await service.get_by_uuid(resource.workspace_instance.uuid)
+    assert instance is not None
+
+    graph = {
+        "nodes": [
+            {
+                "id": "start",
+                "data": {
+                    "registryId": "Start",
+                    "name": "Start",
+                    "inputs": [],
+                    "outputs": [{"name": "item", "type": "string", "required": True, "open": True}],
+                    "config": {},
+                },
+            },
+            {
+                "id": "slow",
+                "data": {
+                    "registryId": "TestSlowLiveNode",
+                    "name": "Slow",
+                    "inputs": [
+                        {
+                            "name": "item",
+                            "type": "string",
+                            "required": True,
+                            "open": True,
+                            "value": {
+                                "type": "ref",
+                                "content": {"blockID": "start", "path": "item"},
+                            },
+                        }
+                    ],
+                    "outputs": [{"name": "value", "type": "string", "required": True, "open": True}],
+                    "config": {},
+                },
+            },
+            {
+                "id": "end",
+                "data": {
+                    "registryId": "End",
+                    "name": "End",
+                    "inputs": [
+                        {
+                            "name": "result",
+                            "type": "string",
+                            "required": True,
+                            "open": True,
+                            "value": {
+                                "type": "ref",
+                                "content": {"blockID": "slow", "path": "value"},
+                            },
+                        }
+                    ],
+                    "outputs": [],
+                    "config": {"returnType": "Object"},
+                },
+            },
+        ],
+        "edges": [
+            {"sourceNodeID": "start", "targetNodeID": "slow", "sourcePortID": "0", "targetPortID": "0"},
+            {"sourceNodeID": "slow", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+        ],
+    }
+
+    await service.update_instance(instance, {"graph": graph})
+
+    run_result = await service.async_execute(
+        instance.uuid,
+        WorkflowExecutionRequest(inputs={"item": "detached"}),
+        actor,
+    )
+
+    first_event = await run_result.generator.get()
+    assert first_event.event == "start"
+    assert first_event.id == "1"
+
+    assert callable(run_result.detach)
+    run_result.detach()
+
+    live_events = []
+    async for envelope in service.stream_live_run_events(run_result.run_id, after_seq=1):
+        live_events.append(envelope)
+        payload = envelope.get("payload", {})
+        if payload.get("event") == "finish":
+            break
+
+    assert any(envelope.get("payload", {}).get("event") == "node_start" for envelope in live_events)
+    finish_envelope = next(
+        envelope for envelope in live_events if envelope.get("payload", {}).get("event") == "finish"
+    )
+    finish_payload = finish_envelope["payload"]["data"]
+    assert finish_payload["output"]["result"] == "live:detached"
+
+    if run_result.task:
+        await run_result.task
+
+    detail = await service.get_run(run_result.run_id)
+    assert detail.status == "succeeded"

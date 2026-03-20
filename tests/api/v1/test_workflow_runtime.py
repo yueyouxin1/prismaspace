@@ -1,5 +1,7 @@
 # tests/api/v1/test_workflow_runtime.py
 
+import asyncio
+
 import pytest
 from httpx import AsyncClient
 from typing import Callable
@@ -8,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import UserContext
 from app.models.resource import Resource
+from app.schemas.resource.workflow.workflow_schemas import WorkflowExecutionRequest
 from app.system.resource.workflow.node_def_manager import NodeDefManager
 from app.engine.workflow import (
     BaseNodeConfig,
@@ -29,6 +32,10 @@ class _DebugEchoConfig(BaseNodeConfig):
     pass
 
 
+class _SlowLiveConfig(BaseNodeConfig):
+    pass
+
+
 DEBUG_ECHO_TEMPLATE = NodeTemplate(
     category=NodeCategory.CUSTOM,
     icon="zap",
@@ -44,10 +51,36 @@ DEBUG_ECHO_TEMPLATE = NodeTemplate(
 )
 
 
+SLOW_LIVE_TEMPLATE = NodeTemplate(
+    category=NodeCategory.CUSTOM,
+    icon="clock-3",
+    data=NodeData(
+        registryId="ApiSlowLiveNode",
+        name="API Slow Live Node",
+        description="Sleep briefly to validate /live attach.",
+        inputs=[ParameterSchema(name="text", type="string", required=True, open=True)],
+        outputs=[ParameterSchema(name="echo", type="string", required=True, open=True)],
+        config=_SlowLiveConfig(),
+    ),
+    forms=[],
+)
+
+
 @register_node(template=DEBUG_ECHO_TEMPLATE)
 class DebugEchoNode(BaseNode):
     async def execute(self) -> NodeExecutionResult:
         node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        return NodeExecutionResult(
+            input=node_input,
+            data=NodeResultData(output={"echo": f"echo:{node_input.get('text', '')}"}),
+        )
+
+
+@register_node(template=SLOW_LIVE_TEMPLATE)
+class ApiSlowLiveNode(BaseNode):
+    async def execute(self) -> NodeExecutionResult:
+        node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        await asyncio.sleep(0.2)
         return NodeExecutionResult(
             input=node_input,
             data=NodeResultData(output={"echo": f"echo:{node_input.get('text', '')}"}),
@@ -962,3 +995,121 @@ class TestWorkflowRuntimeApi:
 
         assert "event: start" in body
         assert "event: finish" in body
+
+    async def test_workflow_live_endpoint_streams_detached_run_by_run_id(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+        app_context_factory,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string", "required": True, "open": True}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "slow",
+                        "data": {
+                            "registryId": "ApiSlowLiveNode",
+                            "name": "Slow",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "echo", "type": "string", "required": True, "open": True}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "slow", "path": "echo"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "slow", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "slow", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+
+        app_context = await app_context_factory(registered_user_with_pro.user)
+        from app.services.resource.workflow.workflow_service import WorkflowService
+
+        service = WorkflowService(app_context)
+        run_result = await service.async_execute(
+            instance_uuid,
+            WorkflowExecutionRequest(inputs={"text": "live-api"}),
+            registered_user_with_pro.user,
+        )
+
+        first_event = await run_result.generator.get()
+        assert first_event.event == "start"
+        run_id = str(first_event.data["run_id"])
+        assert first_event.id == "1"
+        assert callable(run_result.detach)
+        run_result.detach()
+
+        async with client.stream(
+            "GET",
+            f"/api/v1/workflow/runs/{run_id}/live",
+            params={"after_seq": 1},
+            headers=headers,
+        ) as live_response:
+            assert live_response.status_code == status.HTTP_200_OK, live_response.text
+            body = ""
+            async for chunk in live_response.aiter_text():
+                body += chunk
+                if "event: finish" in body:
+                    break
+
+        assert "event: node_start" in body
+        assert "event: finish" in body
+        assert '"result": "echo:live-api"' in body
+
+        if run_result.task:
+            await run_result.task
