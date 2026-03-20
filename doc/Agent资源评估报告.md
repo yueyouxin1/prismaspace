@@ -244,12 +244,6 @@ poetry run pytest tests/api/v1/agent/test_agent_ag_ui_sse.py tests/api/v1/agent/
 
 - 本轮主要覆盖的是 reconnect 语义收口、active-run/live 查询、checkpoint 恢复主链路、execution ledger active 判定与冗余锁清理后的行为稳定性。
 
-### 7.2 已知非本轮问题
-
-当前仍可见项目内既有 `datetime.utcnow()` deprecation warnings。
-
-这不是本轮 Agent 调整引入的问题，但应作为后续代码整洁性收尾项继续清理。
-
 ---
 
 ## 8. 当前验收判断
