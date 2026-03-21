@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from app.core.trace_manager import TraceManager
-from app.models import ResourceExecutionStatus, User, Workflow, Workspace
+from app.models import ResourceExecution, ResourceExecutionStatus, User, Workflow, Workspace
 from app.schemas.resource.workflow.workflow_schemas import (
     WorkflowEvent,
     WorkflowExecutionRequest,
@@ -17,6 +17,7 @@ from app.schemas.resource.workflow.workflow_schemas import (
 from app.services.auditing.types.attributes import WorkflowAttributes
 from app.services.exceptions import ServiceException
 from app.services.resource.workflow.interceptors import WorkflowTraceInterceptor
+from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer
 from app.services.resource.workflow.runtime_persistence import WorkflowDurableRuntimeObserver
 from app.services.resource.workflow.runtime_registry import WorkflowTaskRegistry
 from app.services.resource.workflow.types.workflow import ExternalContext, PreparedWorkflowRun, WorkflowRunResult
@@ -395,7 +396,7 @@ class WorkflowRunExecutionService:
     async def run_background_task(
         self,
         *,
-        execution,
+        execution: ResourceExecution,
         workflow_instance: Workflow,
         runtime_plan: WorkflowRuntimePlan,
         restored_snapshot: Optional[WorkflowRuntimeSnapshot],
@@ -405,7 +406,7 @@ class WorkflowRunExecutionService:
         external_context: ExternalContext,
         trace_id: str,
         actor: User,
-        live_event_buffer=None,
+        live_event_buffer: Optional[WorkflowLiveEventBuffer] = None,
     ) -> None:
         service = self.workflow_service
         tracing_interceptor = WorkflowTraceInterceptor(

@@ -1,13 +1,19 @@
 from asyncio import Task
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Callable, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Optional, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.context import AppContext
-from app.models import Workspace, Workflow
+from app.models import ResourceExecution, User, Workspace, Workflow
 from app.schemas.protocol import WorkflowRuntimeEventEnvelope, WorkflowRuntimeProtocol
 from app.utils.async_generator import AsyncGeneratorManager 
+
+if TYPE_CHECKING:
+    from app.engine.workflow import WorkflowRuntimePlan, WorkflowRuntimeSnapshot
+    from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer
+    from app.services.resource.workflow.run_execution import WorkflowStreamCallbacks
+
 
 @dataclass
 class WorkflowRunResult:
@@ -20,10 +26,24 @@ class WorkflowRunResult:
     detach: Optional[Callable[[], None]] = None
 
 
+class WorkflowBackgroundTaskKwargs(TypedDict):
+    execution: ResourceExecution
+    workflow_instance: Workflow
+    runtime_plan: "WorkflowRuntimePlan"
+    restored_snapshot: Optional["WorkflowRuntimeSnapshot"]
+    payload: dict[str, Any]
+    callbacks: "WorkflowStreamCallbacks"
+    generator_manager: AsyncGeneratorManager
+    external_context: "ExternalContext"
+    trace_id: str
+    actor: User
+    live_event_buffer: Optional["WorkflowLiveEventBuffer"]
+
+
 @dataclass
 class PreparedWorkflowRun:
     result: WorkflowRunResult
-    background_task_kwargs: dict[str, Any]
+    background_task_kwargs: WorkflowBackgroundTaskKwargs
 
 
 @dataclass

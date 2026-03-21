@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import nullcontext
 from typing import Optional
 
+from app.core.trace_manager import TraceManager
 from app.models import ResourceExecution, ResourceExecutionStatus
 from app.models.resource.agent import Agent, AgentMessageRole
 from app.models.resource.base import ResourceRef
 from app.schemas.protocol import RunAgentInputExt
+from app.schemas.resource.agent.agent_schemas import AgentConfig
 from app.services.common.llm_capability_provider import UsageAccumulator
 from app.services.exceptions import ServiceException
 from app.services.auditing.types.attributes import AgentAttributes, AgentMeta
+from app.services.resource.agent.agent_session_manager import AgentSessionManager
+from app.services.resource.agent.live_events import AgentLiveEventBuffer
 from app.services.resource.agent.persisting_callbacks import PersistingAgentCallbacks
-from app.services.resource.agent.processors import ShortContextProcessor
+from app.services.resource.agent.processors import ResourceAwareToolExecutor, ShortContextProcessor
+from app.services.resource.agent.protocol_adapter.base import ProtocolAdaptedRun
 from app.services.resource.agent.types.agent import AgentStreamMessageIds
-from app.engine.agent import AgentInput, AgentResult
+from app.engine.agent import AgentInput, AgentResult, AgentRuntimeCheckpoint
 from app.engine.model.llm import LLMMessage, LLMRunConfig
 from app.utils.async_generator import AsyncGeneratorManager
-import logging
+from app.models import ServiceModuleVersion, Workspace
 
 
 logger = logging.getLogger(__name__)
@@ -34,22 +40,22 @@ class AgentRunExecutionService:
     async def run_background_task(
         self,
         *,
-        agent_config,
-        llm_module_version,
-        runtime_workspace,
-        trace_manager,
+        agent_config: AgentConfig,
+        llm_module_version: ServiceModuleVersion,
+        runtime_workspace: Workspace,
+        trace_manager: TraceManager,
         generator_manager: AsyncGeneratorManager,
         execution: ResourceExecution,
         turn_id: str,
-        session_manager=None,
+        session_manager: Optional[AgentSessionManager] = None,
         run_input: Optional[RunAgentInputExt] = None,
         message_ids: Optional[AgentStreamMessageIds] = None,
         dependencies: Optional[list[ResourceRef]] = None,
-        adapted=None,
-        tool_executor=None,
+        adapted: Optional[ProtocolAdaptedRun] = None,
+        tool_executor: Optional[ResourceAwareToolExecutor] = None,
         agent_instance: Optional[Agent] = None,
-        live_event_buffer=None,
-        resume_checkpoint=None,
+        live_event_buffer: Optional[AgentLiveEventBuffer] = None,
+        resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
     ) -> None:
         service = self.agent_service
         callbacks: Optional[PersistingAgentCallbacks] = None

@@ -67,7 +67,7 @@ from app.services.resource.agent.persisting_callbacks import PersistingAgentCall
 from app.services.resource.agent.processors import ResourceAwareToolExecutor, ShortContextProcessor
 from app.services.resource.agent.protocol_adapter import AgUiProtocolAdapter, ProtocolAdapterRegistry
 from app.services.resource.agent.protocol_adapter.base import ProtocolAdaptedRun
-from app.services.resource.agent.live_events import AgentLiveEventService
+from app.services.resource.agent.live_events import AgentLiveEventBuffer, AgentLiveEventService
 from app.services.resource.agent.run_control import AgentRunControlService, AgentRunRegistry
 from app.services.resource.agent.run_persistence import AgentRunPersistenceService
 from app.services.resource.agent.run_preparation import AgentRunPreparationService
@@ -609,6 +609,7 @@ class AgentService(ResourceImplementationService):
 
     async def _run_agent_background_task(
         self,
+        *,
         agent_config: AgentConfig,
         llm_module_version: ServiceModuleVersion,
         runtime_workspace: Workspace,
@@ -623,8 +624,9 @@ class AgentService(ResourceImplementationService):
         adapted: Optional[ProtocolAdaptedRun] = None,
         tool_executor: Optional[ResourceAwareToolExecutor] = None,
         agent_instance: Optional[Agent] = None,
+        live_event_buffer: Optional[AgentLiveEventBuffer] = None,
         resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
-    ):
+    ) -> None:
         await self._execution_service().run_background_task(
             agent_config=agent_config,
             llm_module_version=llm_module_version,
@@ -640,6 +642,7 @@ class AgentService(ResourceImplementationService):
             adapted=adapted,
             tool_executor=tool_executor,
             agent_instance=agent_instance,
+            live_event_buffer=live_event_buffer,
             resume_checkpoint=resume_checkpoint,
         )
 

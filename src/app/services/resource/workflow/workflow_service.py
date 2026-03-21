@@ -8,7 +8,9 @@ from sqlalchemy import func
 
 from app.core.context import AppContext
 from app.db.session import SessionLocal
+from app.utils.async_generator import AsyncGeneratorManager
 from app.models import (
+    ResourceExecution,
     User,
     Workspace,
     Resource,
@@ -35,14 +37,14 @@ from app.services.resource.resource_ref_service import ResourceRefService
 from app.services.exceptions import ServiceException, NotFoundError
 from app.services.resource.workflow.protocol_adapter.registry import build_default_workflow_protocol_registry
 from app.services.resource.workflow.event_log_service import WorkflowEventLogService
-from app.services.resource.workflow.live_events import WorkflowLiveEventService
+from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer, WorkflowLiveEventService
 from app.services.resource.workflow.run_control import WorkflowRunControlService
-from app.services.resource.workflow.run_execution import WorkflowRunExecutionService
+from app.services.resource.workflow.run_execution import WorkflowRunExecutionService, WorkflowStreamCallbacks
 from app.services.resource.workflow.run_preparation import WorkflowRunPreparationService
 from app.services.resource.workflow.run_query import WorkflowRunQueryService
 from app.services.resource.workflow.runtime_persistence import WorkflowRuntimePersistenceService
 from app.services.resource.workflow.runtime_runner import WorkflowRuntimeRunner
-from app.services.resource.workflow.types.workflow import PreparedWorkflowRun, WorkflowRunResult
+from app.services.resource.workflow.types.workflow import ExternalContext, PreparedWorkflowRun, WorkflowRunResult
 # Engine Imports
 from app.engine.workflow import (
     ParameterSchema,
@@ -50,6 +52,8 @@ from app.engine.workflow import (
     WorkflowGraph,
     WorkflowGraphDef,
     WorkflowRuntimeCompiler,
+    WorkflowRuntimePlan,
+    WorkflowRuntimeSnapshot,
 )
 from app.engine.utils.parameter_schema_utils import build_json_schema_node
 from app.engine.schemas.parameter_schema import RefValue, ValueRefContent
@@ -728,17 +732,17 @@ class WorkflowService(ResourceImplementationService):
     async def _run_workflow_background_task(
         self,
         *,
-        execution,
+        execution: ResourceExecution,
         workflow_instance: Workflow,
-        runtime_plan,
-        restored_snapshot,
+        runtime_plan: WorkflowRuntimePlan,
+        restored_snapshot: Optional[WorkflowRuntimeSnapshot],
         payload: Dict[str, Any],
-        callbacks,
-        generator_manager,
-        external_context,
+        callbacks: WorkflowStreamCallbacks,
+        generator_manager: AsyncGeneratorManager,
+        external_context: ExternalContext,
         trace_id: str,
         actor: User,
-        live_event_buffer=None,
+        live_event_buffer: Optional[WorkflowLiveEventBuffer] = None,
     ) -> None:
         await self.run_execution_service.run_background_task(
             execution=execution,
