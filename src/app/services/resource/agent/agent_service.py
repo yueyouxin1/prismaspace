@@ -623,6 +623,7 @@ class AgentService(ResourceImplementationService):
         adapted: Optional[ProtocolAdaptedRun] = None,
         tool_executor: Optional[ResourceAwareToolExecutor] = None,
         agent_instance: Optional[Agent] = None,
+        resume_checkpoint: Optional[AgentRuntimeCheckpoint] = None,
     ):
         await self._execution_service().run_background_task(
             agent_config=agent_config,
@@ -639,6 +640,7 @@ class AgentService(ResourceImplementationService):
             adapted=adapted,
             tool_executor=tool_executor,
             agent_instance=agent_instance,
+            resume_checkpoint=resume_checkpoint,
         )
 
     async def _should_cancel_run(self, run_id: str) -> bool:
@@ -754,6 +756,9 @@ class AgentService(ResourceImplementationService):
 
     async def get_by_uuid(self, instance_uuid: str) -> Optional[Agent]:
         return await self.dao.get_by_uuid(instance_uuid)
+
+    async def get_runtime_by_uuid(self, instance_uuid: str) -> Optional[Agent]:
+        return await self.dao.get_runtime_by_uuid(instance_uuid)
 
     async def create_instance(self, resource: Resource, actor: User) -> Agent:
         # 1. 获取默认 LLM 模型

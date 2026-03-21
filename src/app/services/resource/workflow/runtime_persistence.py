@@ -380,6 +380,20 @@ class WorkflowDurableRuntimeObserver:
         if self.event_callback is None:
             return
 
+        node_payload: Dict[str, Any] = {}
+        if checkpoint.node_id:
+            try:
+                node_spec = self.runtime_plan.get_node(checkpoint.node_id)
+                node_payload = {
+                    "node": {
+                        "id": node_spec.id,
+                        "registryId": node_spec.registry_id,
+                        "name": node_spec.name,
+                    }
+                }
+            except KeyError:
+                node_payload = {}
+
         await self.event_callback(
             "checkpoint.created",
             {
@@ -389,5 +403,6 @@ class WorkflowDurableRuntimeObserver:
                 "stepIndex": checkpoint.step_index,
                 "run_id": self.execution.run_id,
                 "thread_id": self.execution.thread_id,
+                **node_payload,
             },
         )

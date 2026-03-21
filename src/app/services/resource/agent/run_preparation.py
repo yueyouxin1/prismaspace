@@ -34,7 +34,7 @@ class AgentRunPreparationService:
         runtime_workspace: Optional[Workspace] = None,
     ) -> PreparedAgentRun:
         service = self.agent_service
-        instance = await service.get_by_uuid(instance_uuid)
+        instance = await service.get_runtime_by_uuid(instance_uuid)
         if not instance:
             raise NotFoundError("Agent not found")
         await service._check_execute_perm(instance)
@@ -60,8 +60,6 @@ class AgentRunPreparationService:
             raise ServiceException("Agent input content is required.")
 
         generator_manager = AsyncGeneratorManager()
-        dependencies = await service.ref_dao.get_dependencies(instance.id)
-
         trace_id = str(uuid.uuid4())
         requested_thread_id = service._normalize_thread_id(adapted.thread_id)
         if not requested_thread_id:
@@ -79,6 +77,7 @@ class AgentRunPreparationService:
 
         parent_execution = None
         parent_checkpoint = None
+        resume_checkpoint = None
         turn_id: Optional[str] = None
         execution: Optional[ResourceExecution] = None
         try:
@@ -116,6 +115,10 @@ class AgentRunPreparationService:
                         parent_checkpoint = await service.run_persistence_service.get_checkpoint(
                             execution_id=parent_execution.id
                         )
+                        if parent_checkpoint and isinstance(parent_checkpoint.runtime_snapshot, dict):
+                            resume_checkpoint = service._restore_runtime_checkpoint(
+                                parent_checkpoint.runtime_snapshot
+                            )
 
             if resume_interrupt_id:
                 if parent_execution is None:
@@ -219,11 +222,12 @@ class AgentRunPreparationService:
                     "session_manager": session_manager,
                     "run_input": canonical_run_input,
                     "message_ids": message_ids,
-                    "dependencies": dependencies,
+                    "dependencies": None,
                     "adapted": adapted,
                     "tool_executor": tool_executor,
                     "agent_instance": instance,
                     "live_event_buffer": live_event_buffer,
+                    "resume_checkpoint": resume_checkpoint,
                 },
             )
         except Exception as exc:

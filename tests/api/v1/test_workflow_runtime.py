@@ -220,6 +220,25 @@ class TestWorkflowRuntimeApi:
         assert run_payload["latest_checkpoint"] is not None
         assert len(run_payload["node_executions"]) >= 2
 
+    async def test_reject_unsupported_workflow_protocol_on_execute(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        response = await client.post(
+            f"/api/v1/workflow/{instance_uuid}/execute",
+            json={"protocol": "chatflow-ag-ui", "inputs": {}},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, response.text
+        assert "reserved but not implemented yet" in response.text
+
     async def test_start_end_minimal_flow_maps_workflow_input_to_output(
         self,
         client: AsyncClient,
@@ -1206,7 +1225,6 @@ class TestWorkflowRuntimeApi:
 
         assert "event: node.started" in body
         assert "event: run.finished" in body
-        assert '"spec": "prismaspace.workflow.runtime/v1"' in body
         assert '"result": "echo:live-api"' in body
 
         if run_result.task:

@@ -1,10 +1,46 @@
 # Workflow资源协议与运行时评估报告（2026-03-20）
 
-- 报告版本：v1.0
+- 报告版本：v1.1
 - 评估方式：基于当前工作树代码审查、现有文档比对与运行时契约梳理
-- 核心结论：**Workflow 运行时本身已经进入 durable runtime 阶段，但对外协议层仍停留在“产品内自定义事件流”阶段。**
+- 核心结论：**初版评估指出的“Workflow 缺正式协议层和统一 service 分层”问题，现已完成第一阶段收口；当前主要剩余项转为前端运行中心、UIAPP host 和 future profile。**
 - 最终建议：**不要把 Workflow 原生协议直接等同于 AG-UI；应新增一套 Workflow 专用标准协议，并为 Agent 节点提供 AG-UI 兼容层，同时给未来 Chat Flow 预留扩展位。**
-- 当前落地：**WRP v1 已固化为对内协议说明，见 `doc/workflow-runtime-protocol.md`。**
+- 当前落地：**WRP v1 已固化为对内协议说明；后端默认协议已收口到 `wrp`，请求边界显式 `protocol`，且 `run_query / run_control / run_preparation / run_execution` 已落地。**
+
+---
+
+## 0. 2026-03-21 复核结论
+
+相较 2026-03-20 初版评估，当前代码已经完成以下关键收口：
+
+- `src/app/schemas/protocol/workflow_runtime.py` 和 `doc/workflow-runtime-protocol.md` 已定义 WRP v1
+- Workflow 默认直接走 `wrp`，协议选择放在请求边界 `protocol`，不再依赖消息级 `spec`
+- `src/app/services/resource/workflow/protocol_adapter/` + `protocol_bridge.py` 已接管 SSE / WS / replay / live attach 协议映射
+- `workflow_service.py` 已拆出 `run_query.py`、`run_control.py`、`run_preparation.py`、`run_execution.py`
+- API / WS 已移除为补 node metadata 再查 instance graph 的额外逻辑，首事件流前置步骤更短
+- SSE / WS 断连均已收口为 detach，不再隐式 cancel；`/runs/{run_id}/live` 已成为通用 reconnect 主链路
+
+当前仍未完成、但已从“协议收口阻塞项”降级为“产品面剩余项”的内容是：
+
+- 前端运行中心与前端回归测试
+- UIAPP host 真正挂载和双向交互
+- Chat Flow / AG-UI workflow profile 的具体 adapter 实现
+
+前端当前已补到的生产消费面包括：
+
+- `WorkflowWorkbench.vue` 已把 run stream 管理抽到 composable，不再把 attach / replay / resume / debug 流逻辑散在页面脚本里
+- `WorkflowTestRunPanel.vue` 已直接展示 checkpoint、node executions、完整展开的事件流和 interrupt 信息
+- 页面在 instance 切换时会主动清理旧 run stream，避免跨 workflow 残留 live attach 状态
+
+运行时热路径本轮继续补强：
+
+- resume 路径不再先 compile graph 再被 checkpoint runtime plan 覆盖
+- workflow durable event log 的 sequence 不再每个事件都先查一次最新事件
+- live attach 的 Redis 读取不再每轮全量 `LRANGE 0 -1`，改为按尾部窗口补流
+
+说明：
+
+- 下文大部分章节保留 2026-03-20 的原始评估上下文，用于对照为什么要做这轮收口。
+- 若下文原始判断与本节复核状态冲突，以本节和当前代码实现为准。
 
 ---
 
@@ -578,7 +614,6 @@ WRP 刚好就是为了解这个问题。
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "node.completed",
   "seq": 18,
   "ts": "2026-03-20T12:00:00Z",
@@ -604,7 +639,7 @@ WRP 刚好就是为了解这个问题。
 
 关键点：
 
-- `spec` 明确协议版本
+- 协议版本由 WRP 文档与请求边界 `protocol` 共同定义，不再要求每条消息携带 `spec`
 - `type` 明确事件类型
 - `seq` 支撑基于 `run_id` 的 attach/replay 补流
 - `runId/traceId` 成为所有事件的一等字段
@@ -690,7 +725,6 @@ WRP 刚好就是为了解这个问题。
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "session.ready",
   "payload": {
     "capabilities": [
@@ -731,9 +765,10 @@ WRP 刚好就是为了解这个问题。
 
 至少包括：
 
-- `http_sse.py`
-- `websocket.py`
-- `ag_ui_bridge.py`
+- `base.py`
+- `registry.py`
+- `runtime.py`
+- `protocol_bridge.py`
 
 职责：
 

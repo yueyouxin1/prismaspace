@@ -19,14 +19,16 @@ from .ag_ui import (
 )
 from .workflow_runtime import (
     WORKFLOW_RUNTIME_CAPABILITIES,
-    WORKFLOW_RUNTIME_SPEC,
+    WORKFLOW_DEFAULT_PROTOCOL,
     WorkflowRuntimeCapability,
     WorkflowRuntimeControlMessage,
     WorkflowRuntimeEventEnvelope,
     WorkflowRuntimeEventType,
     WorkflowRuntimeNodeRef,
     WorkflowRuntimeActiveRunResolveMessage,
+    WorkflowRuntimeProtocol,
     WorkflowRunStatus,
+    WORKFLOW_RUNTIME_PROTOCOLS,
     WorkflowRuntimeRunAttachMessage,
     WorkflowRuntimeRunCancelMessage,
     WorkflowRuntimeRunResumeMessage,

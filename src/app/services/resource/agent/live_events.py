@@ -130,8 +130,39 @@ class AgentLiveEventService(BaseService):
         await self.append_event_batch(run_id, [envelope])
         return envelope
 
+    async def _load_tail_window(self, run_id: str) -> tuple[Optional[int], int]:
+        async with self.redis.client.pipeline(transaction=False) as pipe:
+            pipe.get(self.seq_key(run_id))
+            pipe.llen(self.events_key(run_id))
+            raw_last_seq, raw_length = await pipe.execute()
+
+        try:
+            last_seq = int(raw_last_seq) if raw_last_seq is not None else None
+        except Exception:
+            last_seq = None
+
+        try:
+            length = int(raw_length or 0)
+        except Exception:
+            length = 0
+
+        return last_seq, max(length, 0)
+
     async def get_buffered_events(self, run_id: str, *, after_seq: int = 0) -> List[Dict[str, Any]]:
-        raw_items = await self.redis.client.lrange(self.events_key(run_id), 0, -1)
+        key = self.events_key(run_id)
+        last_seq, length = await self._load_tail_window(run_id)
+        if length <= 0:
+            return []
+
+        if last_seq is None:
+            raw_items = await self.redis.client.lrange(key, 0, -1)
+        else:
+            earliest_seq = max(1, last_seq - length + 1)
+            if after_seq >= last_seq:
+                return []
+            start_index = 0 if after_seq < earliest_seq else int(after_seq - earliest_seq + 1)
+            raw_items = await self.redis.client.lrange(key, start_index, -1)
+
         events: List[Dict[str, Any]] = []
         for item in raw_items:
             try:

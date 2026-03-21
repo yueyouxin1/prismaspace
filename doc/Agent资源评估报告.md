@@ -1,8 +1,35 @@
 # Agent资源评估报告（2026-03-10 Agent生产化收口版）
 
-- 报告版本：v6.0
+- 报告版本：v6.1
 - 评估方式：基于当前工作树代码审查、架构收口、定向回归测试与现有 Agent 文档更新
 - 当前结论：**Agent 资源已经达到生产级主链路水准，可按生产基线验收；但仍不单独宣称“极致性能已证明”或“已完全等同 Coze 全平台”。**
+
+---
+
+## 0. 2026-03-21 热路径复核结论
+
+在 2026-03-10 的生产化收口之后，本轮又对 Agent 的“首事件前置路径”和 live attach 路径做了一轮只动内部实现的优化，且不改 AG-UI 协议与前端契约。
+
+本轮已落地的点：
+
+- Agent 启动时改走 runtime 专用 instance loader，不再为执行路径默认预加载 `linked_feature -> product -> prices -> tiers`
+- prepare 阶段不再提前查询 dependencies，改为仅在真正需要构建 pipeline 时按需加载
+- resume 路径不再在 execution 阶段重复查 parent run checkpoint，prepare 阶段已恢复并透传 `resume_checkpoint`
+- live attach 的 Redis 读取不再每轮全量 `LRANGE 0 -1`，改为按尾部窗口读取
+- 高频事件的 cancel 检查增加了短周期本地缓存，避免每个 token/event 都打一趟 Redis
+
+当前仍保留、且判断为必要的逻辑：
+
+- `session` 级写锁
+- `active-run` 预检查
+- AG-UI protocol adapter
+- live buffer detach 后再刷 Redis 的设计
+
+这意味着：
+
+- Agent 主链路仍保持既有生产语义
+- 首事件前置路径和 live attach 路径比 3 月 10 日版本更轻
+- 但依然不把这份报告表述成“性能已证明达到极致”
 
 ---
 

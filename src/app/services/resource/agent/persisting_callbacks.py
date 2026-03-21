@@ -103,6 +103,9 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         self._tool_history: Dict[str, Dict[str, Any]] = {}
         self._step_counter: int = 0
         self._runtime_checkpoint_snapshot: Dict[str, Any] = {}
+        self._cancel_check_interval_seconds = 0.05
+        self._last_cancel_check_at = 0.0
+        self._last_cancel_check_result = False
 
     def _base_meta(self) -> Dict[str, Any]:
         thread_id = (
@@ -119,7 +122,7 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         }
 
     async def _emit(self, event: Any):
-        if self.cancel_checker is not None and await self.cancel_checker():
+        if await self._should_cancel():
             raise asyncio.CancelledError()
         if hasattr(event, "model_dump"):
             payload = event.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -128,6 +131,18 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
             if self.event_sink is not None:
                 await self.event_sink(payload)
         await self.generator_manager.put(event)
+
+    async def _should_cancel(self) -> bool:
+        if self.cancel_checker is None:
+            return False
+
+        now = time.monotonic()
+        if (now - self._last_cancel_check_at) < self._cancel_check_interval_seconds:
+            return self._last_cancel_check_result
+
+        self._last_cancel_check_result = await self.cancel_checker()
+        self._last_cancel_check_at = now
+        return self._last_cancel_check_result
 
     async def _emit_custom(self, name: str, value: Any):
         await self._emit(CustomEvent(type=EventType.CUSTOM, name=name, value=value))

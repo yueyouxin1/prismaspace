@@ -7,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.resource.workflow.workflow_schemas import WorkflowExecutionRequest, WorkflowResumeRequest
 
-
-WORKFLOW_RUNTIME_SPEC = "prismaspace.workflow.runtime/v1"
+WORKFLOW_DEFAULT_PROTOCOL = "wrp"
+WorkflowRuntimeProtocol = Literal["wrp", "chatflow-ag-ui", "uiapp-interactive"]
 WorkflowRuntimeEventType = Literal[
     "session.ready",
     "run.started",
@@ -52,6 +52,11 @@ WORKFLOW_RUNTIME_CAPABILITIES: tuple[WorkflowRuntimeCapability, ...] = (
     "live_attach",
     "history",
 )
+WORKFLOW_RUNTIME_PROTOCOLS: tuple[WorkflowRuntimeProtocol, ...] = (
+    "wrp",
+    "chatflow-ag-ui",
+    "uiapp-interactive",
+)
 
 
 class WorkflowRuntimeScope(BaseModel):
@@ -72,7 +77,6 @@ class WorkflowRuntimeNodeRef(BaseModel):
 class WorkflowRuntimeEventEnvelope(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    spec: Literal[WORKFLOW_RUNTIME_SPEC] = WORKFLOW_RUNTIME_SPEC
     type: WorkflowRuntimeEventType | str
     seq: Optional[int] = None
     ts: datetime
@@ -88,7 +92,7 @@ class WorkflowRuntimeEventEnvelope(BaseModel):
 class WorkflowRuntimeBaseControlMessage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    spec: Literal[WORKFLOW_RUNTIME_SPEC] = WORKFLOW_RUNTIME_SPEC
+    protocol: WorkflowRuntimeProtocol = WORKFLOW_DEFAULT_PROTOCOL
     type: str
     request_id: Optional[str] = Field(default=None, alias="requestId")
 

@@ -1,8 +1,8 @@
 # Workflow TODO（2026-03-20）
 
-- 当前状态：**Workflow runtime 已具备 durable run / checkpoint / interrupt / resume / replay 基础，但协议层和前端消费层仍未收口。**
-- 当前判断：**下一阶段的主目标不是继续堆运行时能力，而是完成协议化收口，并让前端完整覆盖后端能力。**
-- 本文目标：**把评估报告里的预期拆成可执行清单，尤其优先推动前端从同步接口切到流式接口。**
+- 当前状态：**Workflow 后端已经收口到默认 `wrp` 协议、请求边界显式 `protocol`、durable live attach / replay / interrupt / resume，以及 `run_query / run_control / run_preparation / run_execution` 的拆分架构；本轮又补了 resume 路径无效 compile 清理、event sequence 本地缓存和 live attach 尾段读取优化。**
+- 当前判断：**本阶段后端主目标已从“定义协议”切换到“补齐前端运行中心、UIAPP host 和前端回归覆盖”，避免协议与消费面再次漂移。**
+- 本文目标：**继续跟踪评估报告剩余项，并保证 Workflow 与 Agent 在协议边界和 service 分层上保持一致心智。**
 
 ---
 
@@ -50,7 +50,7 @@
 ### 2.1 建立 Workflow 专用协议模型
 
 - [x] 新增 `src/app/schemas/protocol/workflow_runtime.py`
-- [x] 定义统一 event envelope：`spec / type / seq / runId / traceId / payload / optional scope`
+- [x] 定义统一 event envelope：`type / seq / runId / traceId / payload / optional scope`
 - [x] 明确 workflow canonical event types：
   - `run.started`
   - `run.finished`
@@ -81,6 +81,9 @@
 - [x] 让 `workflow_service.py` 只产出 canonical workflow events
 - [x] HTTP SSE / WebSocket / replay / future AG-UI bridge 改由 adapter 层做映射
 - [x] 不再让 `workflow_api.py` 和 `ws_handler.py` 持续手拼 ad hoc 事件
+- [x] adapter registry 下沉到 service / protocol bridge 链路，API/WS 不再直接依赖 adapter 细节
+- [x] 移除 API/WS 为补 node metadata 额外查 instance graph 的逻辑，事件源头直接补齐 `node`
+- [x] `workflow_service.py` 已拆出 `run_query / run_control / run_preparation / run_execution`
 
 ### 2.3 统一运行状态和值域
 
@@ -197,7 +200,7 @@
 ### 5.1 已有后端能力但前端尚未完整承接的项
 
 - [ ] `runs` 列表做成真正的运行中心，而不只是最近记录列表
-- [ ] `getRun` 详情完整展示 checkpoint / can_resume / node executions
+- [x] `getRun` 详情完整展示 checkpoint / can_resume / node executions
 - [ ] `events` 列表支持筛选、定位、时间线视图
 - [ ] `replay` 做成可重放视图，而不是只保留原始 JSON
 - [ ] `cancel` 支持运行中即时反馈
@@ -208,8 +211,8 @@
 
 - [x] run 状态值对齐后端真实值
 - [x] 中断态文案、按钮、恢复入口统一
-- [ ] 运行日志不再只展示最后几条，支持流式累积与完整展开
-- [ ] 测试运行结果区支持区分：
+- [x] 运行日志不再只展示最后几条，支持流式累积与完整展开
+- [x] 测试运行结果区支持区分：
   - 最终输出
   - 事件流
   - 节点执行

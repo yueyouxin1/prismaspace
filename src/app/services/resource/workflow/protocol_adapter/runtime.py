@@ -6,10 +6,11 @@ from typing import Any, Dict, Optional
 from app.schemas.common import SSEvent
 from app.schemas.protocol.workflow_runtime import (
     WORKFLOW_RUNTIME_CAPABILITIES,
-    WORKFLOW_RUNTIME_SPEC,
+    WORKFLOW_DEFAULT_PROTOCOL,
     WorkflowRuntimeEventEnvelope,
     WorkflowRuntimeNodeRef,
 )
+from .base import WorkflowProtocolAdapter
 
 WORKFLOW_RUNTIME_EVENT_TYPES = frozenset(
     {
@@ -54,8 +55,8 @@ LEGACY_WORKFLOW_RUNTIME_EVENT_TYPE_MAP = {
 }
 
 
-class WorkflowRuntimeProtocolAdapter:
-    spec = WORKFLOW_RUNTIME_SPEC
+class WorkflowRuntimeProtocolAdapter(WorkflowProtocolAdapter):
+    protocol = WORKFLOW_DEFAULT_PROTOCOL
     capabilities = WORKFLOW_RUNTIME_CAPABILITIES
 
     @staticmethod
@@ -64,6 +65,9 @@ class WorkflowRuntimeProtocolAdapter:
 
     @staticmethod
     def _resolve_node_id(payload: Dict[str, Any]) -> Optional[str]:
+        node_ref = payload.get("node")
+        if isinstance(node_ref, dict) and isinstance(node_ref.get("id"), str):
+            return node_ref["id"]
         if isinstance(payload.get("node_id"), str):
             return payload["node_id"]
         if isinstance(payload.get("nodeId"), str):
@@ -84,6 +88,15 @@ class WorkflowRuntimeProtocolAdapter:
             return "run.cancelled"
         return LEGACY_WORKFLOW_RUNTIME_EVENT_TYPE_MAP.get(event_type, event_type)
 
+    @staticmethod
+    def _resolve_node_ref(payload: Dict[str, Any], node_id: Optional[str]) -> Optional[WorkflowRuntimeNodeRef]:
+        node_ref = payload.get("node")
+        if isinstance(node_ref, dict):
+            return WorkflowRuntimeNodeRef.model_validate(node_ref)
+        if node_id:
+            return WorkflowRuntimeNodeRef(id=node_id)
+        return None
+
     def build_envelope(
         self,
         *,
@@ -95,20 +108,10 @@ class WorkflowRuntimeProtocolAdapter:
         parent_run_id: Optional[str],
         seq: Optional[int] = None,
         ts: Optional[datetime] = None,
-        node_index: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> WorkflowRuntimeEventEnvelope:
         canonical_type = self._resolve_canonical_event_type(event_type, payload)
-        node = None
         node_id = self._resolve_node_id(payload)
-        if node_id and node_index and node_id in node_index:
-            node_meta = node_index[node_id]
-            node = WorkflowRuntimeNodeRef(
-                id=node_id,
-                registryId=node_meta.get("registryId"),
-                name=node_meta.get("name"),
-            )
-        elif node_id:
-            node = WorkflowRuntimeNodeRef(id=node_id)
+        node = self._resolve_node_ref(payload, node_id)
 
         return WorkflowRuntimeEventEnvelope(
             type=canonical_type,

@@ -45,7 +45,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "run.started",
   "seq": 1,
   "ts": "2026-03-21T09:00:00Z",
@@ -61,7 +60,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 字段约束：
 
-- `spec`：固定为 `prismaspace.workflow.runtime/v1`
 - `type`：canonical WRP event type
 - `seq`：同一 `runId` 下单调递增，用于 attach / replay 补流
 - `runId`：所有 workflow runtime 事件的主锚点
@@ -211,7 +209,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "run.start",
   "requestId": "req_1",
   "instanceUuid": "workflow_uuid",
@@ -225,7 +222,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "run.attach",
   "requestId": "req_2",
   "runId": "run_xxx",
@@ -237,7 +233,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "run.cancel",
   "requestId": "req_3",
   "runId": "run_xxx"
@@ -248,7 +243,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "run.resume",
   "requestId": "req_4",
   "instanceUuid": "workflow_uuid",
@@ -271,7 +265,6 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 
 ```json
 {
-  "spec": "prismaspace.workflow.runtime/v1",
   "type": "ui.event.submit",
   "requestId": "req_5",
   "runId": "run_xxx",
@@ -346,3 +339,26 @@ WRP v1 的目标是让 Workflow 的外部契约不再散落在 `workflow_api.py`
 1. SSE / WS / replay adapter 继续兼容 legacy event names
 2. 前端默认按 WRP v1 消费
 3. 老式 resume 载荷继续可用，但不再作为推荐方式
+
+## 13. 协议选择
+
+当前 Workflow runtime transport 默认直接走 `wrp`，并在请求边界显式允许传入 `protocol`。
+
+- HTTP blocking / async / debug / sse：
+  - `WorkflowExecutionRequest.protocol`
+  - 默认值 `wrp`
+- HTTP replay / live：
+  - query `protocol`
+  - 默认值 `wrp`
+- WebSocket control messages：
+  - `protocol`
+  - 默认值 `wrp`
+
+因此 WRP v1 **不再要求每条消息显式携带 `spec` 字段**。协议归属由边界层的 `protocol` + transport + adapter selector 决定，而不是由消息内魔法字符串判断。
+
+未来若新增：
+
+- `chatflow-ag-ui`
+- `uiapp-interactive`
+
+则通过 protocol adapter 层选择，不回退到 per-message `spec` 判定。

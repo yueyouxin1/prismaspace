@@ -25,9 +25,11 @@ class WorkflowEventLogService(BaseService):
         workflow_instance: Workflow,
         event_type: str,
         payload: Dict[str, Any],
+        sequence_no: Optional[int] = None,
     ) -> WorkflowExecutionEvent:
-        last_event = await self.dao.get_last_event(resource_execution_id=execution.id)
-        sequence_no = 1 if last_event is None else last_event.sequence_no + 1
+        if sequence_no is None:
+            last_event = await self.dao.get_last_event(resource_execution_id=execution.id)
+            sequence_no = 1 if last_event is None else last_event.sequence_no + 1
         event = WorkflowExecutionEvent(
             resource_execution_id=execution.id,
             workflow_instance_id=workflow_instance.id,
@@ -38,6 +40,14 @@ class WorkflowEventLogService(BaseService):
         self.db.add(event)
         await self.db.flush()
         return event
+
+    async def get_last_sequence(
+        self,
+        *,
+        execution_id: int,
+    ) -> int:
+        last_event = await self.dao.get_last_event(resource_execution_id=execution_id)
+        return 0 if last_event is None else int(last_event.sequence_no)
 
     async def list_events(
         self,

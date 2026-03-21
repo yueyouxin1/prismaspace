@@ -66,3 +66,37 @@ class AgentDao(BaseDao[Agent]):
                 joinedload(Agent.llm_module_version),
             ]
         )
+
+    async def get_runtime_by_uuid(self, uuid: str) -> Optional[Agent]:
+        resource_loader = joinedload(Agent.resource).options(
+            lazyload("*"),
+            load_only(
+                Resource.id,
+                Resource.uuid,
+                Resource.workspace_id,
+                Resource.resource_type_id,
+                Resource.name,
+                Resource.description,
+                Resource.workspace_instance_id,
+                Resource.latest_published_instance_id,
+            ),
+            joinedload(Resource.workspace).options(
+                lazyload("*"),
+                load_only(
+                    Workspace.id,
+                    Workspace.uuid,
+                    Workspace.owner_user_id,
+                    Workspace.owner_team_id,
+                ),
+                joinedload(Workspace.user_owner).options(joinedload(User.billing_account)),
+                joinedload(Workspace.team).options(joinedload(Team.billing_account)),
+            ),
+        )
+        return await self.get_one(
+            where={"uuid": uuid},
+            options=[
+                lazyload("*"),
+                resource_loader,
+                joinedload(Agent.llm_module_version),
+            ],
+        )

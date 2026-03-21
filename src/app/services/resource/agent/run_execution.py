@@ -49,6 +49,7 @@ class AgentRunExecutionService:
         tool_executor=None,
         agent_instance: Optional[Agent] = None,
         live_event_buffer=None,
+        resume_checkpoint=None,
     ) -> None:
         service = self.agent_service
         callbacks: Optional[PersistingAgentCallbacks] = None
@@ -78,16 +79,6 @@ class AgentRunExecutionService:
 
                 lock_ctx = service._session_lock(session.uuid) if session else nullcontext()
                 async with lock_ctx:
-                    resume_checkpoint = None
-                    if run_input and run_input.parent_run_id:
-                        parent_execution = await service.execution_ledger_service.get_by_run_id(run_input.parent_run_id)
-                        if parent_execution is not None:
-                            parent_checkpoint = await service.run_persistence_service.get_checkpoint(execution_id=parent_execution.id)
-                            if parent_checkpoint and isinstance(parent_checkpoint.runtime_snapshot, dict):
-                                resume_checkpoint = service._restore_runtime_checkpoint(
-                                    parent_checkpoint.runtime_snapshot
-                                )
-
                     if session:
                         await service.db.refresh(session)
                         preload_turns = ShortContextProcessor.compute_fetch_limit(
@@ -119,6 +110,8 @@ class AgentRunExecutionService:
                         prompt_variables = {}
                         pipeline_manager = None
                     else:
+                        if dependencies is None:
+                            dependencies = await service.ref_dao.get_dependencies(agent_instance.id)
                         prompt_variables = await service.agent_memory_var_service.get_runtime_object(
                             agent_instance.version_id,
                             service.context.actor.id,

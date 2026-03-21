@@ -139,6 +139,10 @@ class WorkflowResumeRequest(BaseModel):
 
 
 class WorkflowExecutionRequest(ExecutionRequest):
+    protocol: Literal["wrp", "chatflow-ag-ui", "uiapp-interactive"] = Field(
+        default="wrp",
+        description="Workflow runtime protocol selector. Current default and only supported value: wrp.",
+    )
     thread_id: Optional[str] = Field(default=None, description="逻辑执行线程 ID。")
     parent_run_id: Optional[str] = Field(default=None, description="上游运行 ID，用于 retry/regenerate 谱系。")
     resume_from_run_id: Optional[str] = Field(default=None, description="从指定 run_id 的最新 checkpoint 恢复。")

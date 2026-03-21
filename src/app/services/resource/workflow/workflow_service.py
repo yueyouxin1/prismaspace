@@ -1,19 +1,14 @@
 # src/app/services/resource/workflow/workflow_service.py
 
-import asyncio
 import logging
-import uuid
-from datetime import UTC, datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
+
+from pydantic import ValidationError
 from sqlalchemy import func
-from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
 from app.core.context import AppContext
-from app.core.trace_manager import TraceManager
 from app.db.session import SessionLocal
-from app.utils.async_generator import AsyncGeneratorManager
 from app.models import (
-    ResourceExecutionStatus,
     User,
     Workspace,
     Resource,
@@ -22,150 +17,45 @@ from app.models import (
 )
 from app.dao.resource.workflow.workflow_dao import WorkflowDao, WorkflowNodeDefDao
 from app.dao.resource.resource_ref_dao import ResourceRefDao
+from app.schemas.protocol import WORKFLOW_DEFAULT_PROTOCOL
 from app.schemas.resource.workflow.workflow_schemas import (
-    WorkflowCheckpointRead,
-    WorkflowEvent,
     WorkflowEventRead,
     WorkflowExecutionRequest,
     WorkflowExecutionResponse,
-    WorkflowExecutionResponseData,
     WorkflowInterruptRead,
     WorkflowRead,
-    WorkflowRunNodeRead,
     WorkflowRunRead,
     WorkflowRunSummaryRead,
     WorkflowUpdate,
 )
 from app.schemas.resource.resource_ref_schemas import ReferenceCreate
 from app.services.resource.base.base_impl_service import register_service, ResourceImplementationService, ValidationResult, DependencyInfo
-from app.services.auditing.types.attributes import WorkflowAttributes
-from app.services.resource.workflow.interceptors import WorkflowTraceInterceptor
 from app.services.resource.execution.execution_ledger_service import ExecutionLedgerService
 from app.services.resource.resource_ref_service import ResourceRefService
 from app.services.exceptions import ServiceException, NotFoundError
-from app.services.resource.workflow.runtime_persistence import (
-    WorkflowDurableRuntimeObserver,
-    WorkflowRuntimePersistenceService,
-)
+from app.services.resource.workflow.protocol_adapter.registry import build_default_workflow_protocol_registry
 from app.services.resource.workflow.event_log_service import WorkflowEventLogService
 from app.services.resource.workflow.live_events import WorkflowLiveEventService
+from app.services.resource.workflow.run_control import WorkflowRunControlService
+from app.services.resource.workflow.run_execution import WorkflowRunExecutionService
+from app.services.resource.workflow.run_preparation import WorkflowRunPreparationService
+from app.services.resource.workflow.run_query import WorkflowRunQueryService
+from app.services.resource.workflow.runtime_persistence import WorkflowRuntimePersistenceService
 from app.services.resource.workflow.runtime_runner import WorkflowRuntimeRunner
-from app.services.resource.workflow.runtime_registry import WorkflowTaskRegistry
 from app.services.resource.workflow.types.workflow import PreparedWorkflowRun, WorkflowRunResult
 # Engine Imports
 from app.engine.workflow import (
-    NodeResultData,
-    NodeState,
     ParameterSchema,
-    StreamEvent,
-    WorkflowCallbacks,
     WorkflowEngineService,
     WorkflowGraph,
     WorkflowGraphDef,
-    WorkflowInterruptSignal,
     WorkflowRuntimeCompiler,
-    WorkflowRuntimePlan,
-    WorkflowRuntimeSnapshot,
 )
 from app.engine.utils.parameter_schema_utils import build_json_schema_node
 from app.engine.schemas.parameter_schema import RefValue, ValueRefContent
 from app.engine.model.llm import LLMTool, LLMToolFunction
 
 logger = logging.getLogger(__name__)
-
-class ExternalContext(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    app_context: AppContext = Field(..., description="运行时请求上下文")
-    workflow_instance: Workflow = Field(..., description="当前工作流实例")
-    runtime_workspace: Workspace = Field(..., description="运行时工作空间")
-    trace_id: Optional[str] = Field(None, description="Trace ID")
-    run_id: Optional[str] = Field(None, description="Execution Run ID")
-    thread_id: Optional[str] = Field(None, description="Execution Thread ID")
-    resume_payload: Optional[Dict[str, Any]] = Field(None, description="Resume payload injected on interrupted run recovery")
-
-class WorkflowStreamCallbacks(WorkflowCallbacks):
-    """
-    [Production Adapter]
-    将 Workflow 引擎的内部生命周期事件转换为统一的异步队列事件。
-    使用 queue.put_nowait 配合无限容量队列，防止回调阻塞引擎。
-    """
-    def __init__(
-        self,
-        generator_manager: AsyncGeneratorManager,
-        trace_id: str,
-        run_id: str,
-        thread_id: str,
-        event_persister=None,
-    ):
-        self.generator_manager = generator_manager
-        self.trace_id = trace_id
-        self.run_id = run_id
-        self.thread_id = thread_id
-        self.event_persister = event_persister
-        self.live_event_buffer = None
-
-    def bind_live_event_buffer(self, live_event_buffer) -> None:
-        self.live_event_buffer = live_event_buffer
-
-    async def _safe_put(self, event: WorkflowEvent):
-        try:
-            if self.live_event_buffer is not None:
-                envelope = await self.live_event_buffer.publish(
-                    {
-                        "event": event.event,
-                        "data": event.data,
-                    }
-                )
-                event.id = str(envelope["seq"])
-            if self.event_persister is not None:
-                await self.event_persister(event.event, event.data)
-            self.generator_manager.put_nowait(event)
-        except Exception as e:
-            logger.error(f"Failed to put event to queue: {e}")
-
-    async def on_execution_start(self, workflow_def: WorkflowRuntimePlan) -> None:
-        await self._safe_put(
-            WorkflowEvent(
-                event="run.started",
-                data={
-                    "trace_id": self.trace_id,
-                    "run_id": self.run_id,
-                    "thread_id": self.thread_id,
-                },
-            )
-        )
-
-    async def on_node_start(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node.started", data=state.model_dump()))
-
-    async def on_node_finish(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node.completed", data=state.model_dump()))
-
-    async def on_node_error(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node.failed", data=state.model_dump()))
-
-    async def on_node_skipped(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node.skipped", data=state.model_dump()))
-
-    async def on_stream_start(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream.started", data=event.model_dump()))
-
-    async def on_stream_chunk(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream.delta", data=event.model_dump()))
-        
-    async def on_stream_end(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream.finished", data=event.model_dump()))
-
-    async def on_execution_end(self, result: NodeResultData) -> None:
-        payload = result.model_dump(mode="json")
-        payload.update({"run_id": self.run_id, "thread_id": self.thread_id})
-        await self._safe_put(WorkflowEvent(event="run.finished", data=payload))
-
-    async def on_event(self, type: str, data: Any) -> None:
-        payload = data if isinstance(data, dict) else {"detail": data}
-        payload.setdefault("run_id", self.run_id)
-        payload.setdefault("thread_id", self.thread_id)
-        await self._safe_put(WorkflowEvent(event=type, data=payload))
 
 @register_service
 class WorkflowService(ResourceImplementationService):
@@ -182,7 +72,12 @@ class WorkflowService(ResourceImplementationService):
         self.runtime_persistence = WorkflowRuntimePersistenceService(context)
         self.event_log_service = WorkflowEventLogService(context)
         self.live_event_service = WorkflowLiveEventService(context)
+        self.protocol_adapters = build_default_workflow_protocol_registry()
         self.runtime_compiler = WorkflowRuntimeCompiler()
+        self.run_query_service = WorkflowRunQueryService(self)
+        self.run_control_service = WorkflowRunControlService(self)
+        self.run_execution_service = WorkflowRunExecutionService(self)
+        self.run_preparation_service = WorkflowRunPreparationService(self)
         self._db_session_factory = context.db_session_factory or SessionLocal
 
     # ==========================================================================
@@ -744,6 +639,13 @@ class WorkflowService(ResourceImplementationService):
             ) for ref in refs
         ]
 
+    def resolve_protocol_adapter(self, protocol: Optional[str] = None):
+        resolved = (protocol or WORKFLOW_DEFAULT_PROTOCOL).strip().lower()
+        adapter = self.protocol_adapters.get(resolved)
+        if adapter is None:
+            raise ServiceException(f"Workflow protocol '{resolved}' is reserved but not implemented yet.")
+        return adapter
+
     # ==========================================================================
     # 4. Execution Core (The Unified Generator)
     # ==========================================================================
@@ -755,62 +657,11 @@ class WorkflowService(ResourceImplementationService):
         actor: User, 
         runtime_workspace: Optional[Workspace] = None
     ) -> WorkflowExecutionResponse:
-        final_output = None
-        trace_id = None
-        run_id = None
-        thread_id = None
-        interrupt_payload = None
-        outcome = "success"
-        task: Optional[asyncio.Task] = None
-
-        try:
-            result = await self.async_execute(
-                instance_uuid,
-                execute_params,
-                actor,
-                runtime_workspace,
-            ) 
-            task = result.task
-            run_id = result.run_id
-            thread_id = result.thread_id
-            trace_id = result.trace_id
-            async for event in result.generator:
-                if event.event == "run.started":
-                    trace_id = event.data.get("trace_id") or trace_id
-                    run_id = event.data.get("run_id") or run_id
-                    thread_id = event.data.get("thread_id") or thread_id
-                elif event.event == "run.finished":
-                    final_output = event.data.get("output")
-                    outcome = event.data.get("outcome") or outcome
-                elif event.event == "run.failed":
-                    error_msg = event.data.get("error") if isinstance(event.data, dict) else str(event.data)
-                    raise ServiceException(f"Workflow execution failed: {error_msg}")
-                elif event.event == "run.interrupted":
-                    interrupt_payload = event.data.get("interrupt") if isinstance(event.data, dict) else None
-                    outcome = "interrupt"
-                elif event.event == "run.cancelled":
-                    outcome = "cancelled"
-        except Exception as exc:
-            raise ServiceException(f"Workflow failed: {exc}")
-        finally:
-            if task and not task.done():
-                try:
-                    await task
-                except Exception:
-                    pass
-
-        if final_output is None and interrupt_payload is None:
-            raise ServiceException("Workflow finished without output.")
-
-        return WorkflowExecutionResponse(
-            data=WorkflowExecutionResponseData(
-                output=final_output or {},
-                trace_id=trace_id or "",
-                run_id=run_id,
-                thread_id=thread_id,
-                outcome=outcome,
-                interrupt=WorkflowInterruptRead.model_validate(interrupt_payload) if interrupt_payload else None,
-            )
+        return await self.run_execution_service.execute(
+            instance_uuid=instance_uuid,
+            execute_params=execute_params,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
         )
 
     async def execute_batch(
@@ -820,11 +671,12 @@ class WorkflowService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None
     ) -> List[WorkflowExecutionResponse]:
-        results = []
-        for uuid in instance_uuids:
-            result = await self.execute(uuid, execute_params, actor, runtime_workspace)
-            results.append(result)
-        return results
+        return await self.run_execution_service.execute_batch(
+            instance_uuids=instance_uuids,
+            execute_params=execute_params,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
+        )
 
     async def async_execute(
         self, 
@@ -851,32 +703,12 @@ class WorkflowService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None,
     ) -> WorkflowRunSummaryRead:
-        prepared = await self._prepare_run_context(
+        return await self.run_execution_service.enqueue_background_execute(
             instance_uuid=instance_uuid,
             execute_params=execute_params,
             actor=actor,
             runtime_workspace=runtime_workspace,
         )
-
-        try:
-            await self.context.arq_pool.enqueue_job(
-                "execute_workflow_run_task",
-                run_id=prepared["execution"].run_id,
-                instance_uuid=instance_uuid,
-                actor_uuid=actor.uuid,
-                execute_params=execute_params.model_dump(mode="json", by_alias=True, exclude_none=False),
-            )
-        except Exception as exc:
-            await self.execution_ledger_service.mark_finished(
-                prepared["execution"],
-                status=ResourceExecutionStatus.FAILED,
-                error_code="WORKFLOW_ENQUEUE_ERROR",
-                error_message=str(exc),
-            )
-            await self.db.commit()
-            raise ServiceException(f"Failed to enqueue workflow run: {exc}")
-
-        return self._to_run_summary(prepared["execution"], latest_checkpoint=None)
 
     async def _prepare_async_run(
         self,
@@ -886,173 +718,41 @@ class WorkflowService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None,
     ) -> PreparedWorkflowRun:
-        generator_manager = AsyncGeneratorManager()
-
-        try:
-            prepared = await self._prepare_run_context(
-                instance_uuid=instance_uuid,
-                execute_params=execute_params,
-                actor=actor,
-                runtime_workspace=runtime_workspace,
-            )
-
-            callbacks = WorkflowStreamCallbacks(
-                generator_manager=generator_manager,
-                trace_id=prepared["trace_id"],
-                run_id=prepared["execution"].run_id,
-                thread_id=prepared["execution"].thread_id,
-                event_persister=self._build_event_persister(
-                    execution=prepared["execution"],
-                    workflow_instance=prepared["workflow_instance"],
-                ),
-            )
-            live_event_buffer = self.live_event_service.create_buffer(prepared["execution"].run_id)
-            callbacks.bind_live_event_buffer(live_event_buffer)
-
-            return PreparedWorkflowRun(
-                result=WorkflowRunResult(
-                    generator=generator_manager,
-                    trace_id=prepared["trace_id"],
-                    run_id=prepared["execution"].run_id,
-                    thread_id=prepared["execution"].thread_id,
-                    detach=live_event_buffer.detach,
-                ),
-                background_task_kwargs={
-                    "execution": prepared["execution"],
-                    "workflow_instance": prepared["workflow_instance"],
-                    "runtime_plan": prepared["runtime_plan"],
-                    "restored_snapshot": prepared["restored_snapshot"],
-                    "payload": prepared["payload"],
-                    "callbacks": callbacks,
-                    "generator_manager": generator_manager,
-                    "external_context": prepared["external_context"],
-                    "trace_id": prepared["trace_id"],
-                    "actor": actor,
-                    "live_event_buffer": live_event_buffer,
-                },
-            )
-        except Exception:
-            await generator_manager.aclose(force=True)
-            execution = locals().get("prepared", {}).get("execution") if isinstance(locals().get("prepared"), dict) else None
-            if execution is not None:
-                await self.execution_ledger_service.mark_finished(
-                    execution,
-                    status=ResourceExecutionStatus.FAILED,
-                    error_code="WORKFLOW_RUN_INIT_ERROR",
-                    error_message="Workflow runtime initialization failed.",
-                )
-                await self.db.commit()
-            raise
+        return await self.run_execution_service.prepare_async_run(
+            instance_uuid=instance_uuid,
+            execute_params=execute_params,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
+        )
 
     async def _run_workflow_background_task(
         self,
         *,
         execution,
         workflow_instance: Workflow,
-        runtime_plan: WorkflowRuntimePlan,
-        restored_snapshot: Optional[WorkflowRuntimeSnapshot],
+        runtime_plan,
+        restored_snapshot,
         payload: Dict[str, Any],
-        callbacks: WorkflowStreamCallbacks,
-        generator_manager: AsyncGeneratorManager,
-        external_context: ExternalContext,
+        callbacks,
+        generator_manager,
+        external_context,
         trace_id: str,
         actor: User,
         live_event_buffer=None,
     ) -> None:
-        tracing_interceptor = WorkflowTraceInterceptor(
-            db=self.db,
-            user_id=actor.id,
-            workflow_trace_id=trace_id,
-        )
-        runtime_observer = WorkflowDurableRuntimeObserver(
-            context=self.context,
+        await self.run_execution_service.run_background_task(
             execution=execution,
             workflow_instance=workflow_instance,
             runtime_plan=runtime_plan,
-            event_callback=callbacks.on_event,
+            restored_snapshot=restored_snapshot,
+            payload=payload,
+            callbacks=callbacks,
+            generator_manager=generator_manager,
+            external_context=external_context,
+            trace_id=trace_id,
+            actor=actor,
+            live_event_buffer=live_event_buffer,
         )
-
-        try:
-            await self.execution_ledger_service.mark_running(execution, trace_id=trace_id)
-            await self.db.commit()
-
-            async with TraceManager(
-                db=self.db,
-                operation_name="workflow.run",
-                user_id=actor.id,
-                force_trace_id=trace_id,
-                target_instance_id=workflow_instance.id,
-                attributes=WorkflowAttributes(inputs=payload),
-            ) as root_span:
-                final_output = await self.engine_service.run(
-                    workflow_def=runtime_plan,
-                    payload=payload,
-                    callbacks=callbacks,
-                    external_context=external_context,
-                    interceptors=[tracing_interceptor],
-                    restored_snapshot=restored_snapshot,
-                    runtime_observer=runtime_observer,
-                )
-                root_span.set_output(final_output)
-
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=ResourceExecutionStatus.SUCCEEDED,
-            )
-            await self.db.commit()
-        except WorkflowInterruptSignal as interrupt_exc:
-            interrupt_payload = interrupt_exc.interrupt.model_dump(mode="json")
-            await callbacks.on_event(
-                "run.interrupted",
-                {
-                    "interrupt": interrupt_payload,
-                    "outcome": "interrupt",
-                    "run_id": execution.run_id,
-                    "thread_id": execution.thread_id,
-                },
-            )
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=ResourceExecutionStatus.INTERRUPTED,
-            )
-            await self.db.commit()
-        except asyncio.CancelledError:
-            logger.info("Workflow %s execution cancelled.", workflow_instance.uuid)
-            await runtime_observer.request_cancel()
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=ResourceExecutionStatus.CANCELLED,
-                error_code="WORKFLOW_CANCELLED",
-                error_message="Operation cancelled.",
-            )
-            await self.db.commit()
-            await callbacks.on_event(
-                "run.cancelled",
-                {
-                    "output": {},
-                    "outcome": "cancelled",
-                    "run_id": execution.run_id,
-                    "thread_id": execution.thread_id,
-                },
-            )
-            raise
-        except Exception as exc:
-            logger.error("Workflow execution error: %s", exc, exc_info=True)
-            await callbacks.on_event("run.failed", {"error": str(exc)})
-            status = ResourceExecutionStatus.CANCELLED if await runtime_observer.should_cancel() else ResourceExecutionStatus.FAILED
-            error_code = "WORKFLOW_CANCELLED" if status == ResourceExecutionStatus.CANCELLED else "WORKFLOW_EXECUTION_ERROR"
-            await self.execution_ledger_service.mark_finished(
-                execution,
-                status=status,
-                error_code=error_code,
-                error_message=str(exc),
-            )
-            await self.db.commit()
-        finally:
-            WorkflowTaskRegistry.unregister(execution.run_id)
-            if live_event_buffer is not None:
-                await live_event_buffer.aclose()
-            await generator_manager.aclose(force=False)
 
     async def execute_precreated_run(
         self,
@@ -1063,39 +763,12 @@ class WorkflowService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None,
     ) -> None:
-        prepared = await self._prepare_run_context(
+        await self.run_execution_service.execute_precreated_run(
+            run_id=run_id,
             instance_uuid=instance_uuid,
             execute_params=execute_params,
             actor=actor,
             runtime_workspace=runtime_workspace,
-            existing_run_id=run_id,
-        )
-        generator_manager = AsyncGeneratorManager()
-        callbacks = WorkflowStreamCallbacks(
-            generator_manager=generator_manager,
-            trace_id=prepared["trace_id"],
-            run_id=prepared["execution"].run_id,
-            thread_id=prepared["execution"].thread_id,
-            event_persister=self._build_event_persister(
-                execution=prepared["execution"],
-                workflow_instance=prepared["workflow_instance"],
-            ),
-        )
-        live_event_buffer = self.live_event_service.create_buffer(prepared["execution"].run_id)
-        live_event_buffer.detach()
-        callbacks.bind_live_event_buffer(live_event_buffer)
-        await self._run_workflow_background_task(
-            execution=prepared["execution"],
-            workflow_instance=prepared["workflow_instance"],
-            runtime_plan=prepared["runtime_plan"],
-            restored_snapshot=prepared["restored_snapshot"],
-            payload=prepared["payload"],
-            callbacks=callbacks,
-            generator_manager=generator_manager,
-            external_context=prepared["external_context"],
-            trace_id=prepared["trace_id"],
-            actor=actor,
-            live_event_buffer=live_event_buffer,
         )
 
     async def _prepare_run_context(
@@ -1107,156 +780,29 @@ class WorkflowService(ResourceImplementationService):
         runtime_workspace: Optional[Workspace] = None,
         existing_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        instance = await self.get_by_uuid(instance_uuid)
-        if not instance:
-            raise NotFoundError("Workflow not found")
-        await self._check_execute_perm(instance)
-
-        workspace = runtime_workspace or instance.resource.workspace
-        trace_id = str(uuid.uuid4())
-        graph_override = None
-        if isinstance(execute_params.meta, dict):
-            graph_override = execute_params.meta.get("_workflow_graph_override")
-        runtime_plan = self.runtime_compiler.compile(graph_override or instance.graph)
-        restored_snapshot: Optional[WorkflowRuntimeSnapshot] = None
-        payload = dict(execute_params.inputs or {})
-        resume_payload = None
-        requested_thread_id = (execute_params.thread_id or "").strip()
-        parent_run_id = (execute_params.parent_run_id or "").strip() or None
-        resume_from_run_id = (execute_params.resume_from_run_id or "").strip() or None
-
-        parent_execution = None
-        if resume_from_run_id:
-            if payload:
-                raise ServiceException("Resume execution does not accept new inputs.")
-            parent_execution = await self.execution_ledger_service.get_by_run_id(resume_from_run_id)
-            if not parent_execution:
-                raise NotFoundError("Resume target run not found.")
-            if parent_execution.resource_instance_id != instance.id or parent_execution.user_id != actor.id:
-                raise ServiceException("Resume target does not belong to this workflow or actor.")
-            if parent_execution.status == ResourceExecutionStatus.RUNNING:
-                raise ServiceException("Cannot resume a workflow that is still running.")
-            resume_payload = await self._resolve_resume_payload(
-                parent_execution=parent_execution,
-                execute_params=execute_params,
-            )
-
-            checkpoint = await self.runtime_persistence.get_latest_checkpoint(execution_id=parent_execution.id)
-            if checkpoint is None:
-                raise ServiceException("No checkpoint available for resume.")
-
-            runtime_plan = WorkflowRuntimePlan.model_validate(checkpoint.runtime_plan)
-            restored_snapshot = self.runtime_persistence.build_resume_snapshot(
-                checkpoint=checkpoint,
-                runtime_plan=runtime_plan,
-            )
-            payload = dict(restored_snapshot.payload or {})
-            requested_thread_id = parent_execution.thread_id
-            parent_run_id = parent_execution.run_id
-
-        elif parent_run_id:
-            parent_execution = await self.execution_ledger_service.get_by_run_id(parent_run_id)
-            if not parent_execution:
-                raise NotFoundError("Parent run not found.")
-            if parent_execution.resource_instance_id != instance.id or parent_execution.user_id != actor.id:
-                raise ServiceException("Parent run does not belong to this workflow or actor.")
-            requested_thread_id = requested_thread_id or parent_execution.thread_id
-            if requested_thread_id != parent_execution.thread_id:
-                raise ServiceException("Parent run thread mismatch.")
-
-        execution = None
-        if existing_run_id:
-            execution = await self.execution_ledger_service.get_by_run_id(existing_run_id)
-            if execution is None:
-                raise NotFoundError("Workflow run not found.")
-            if execution.resource_instance_id != instance.id or execution.user_id != actor.id:
-                raise ServiceException("Workflow run does not belong to this workflow or actor.")
-            requested_thread_id = execution.thread_id
-        else:
-            thread_id = requested_thread_id or f"workflow-thread-{uuid.uuid4().hex[:16]}"
-            execution = await self.execution_ledger_service.create_execution(
-                instance=instance,
-                actor=actor,
-                thread_id=thread_id,
-                parent_run_id=parent_run_id,
-            )
-            await self.db.commit()
-
-        external_context = ExternalContext(
-            app_context=self.context,
-            workflow_instance=instance,
-            runtime_workspace=workspace,
-            trace_id=trace_id,
-            run_id=execution.run_id,
-            thread_id=execution.thread_id,
-            resume_payload=resume_payload,
+        return await self.run_preparation_service.prepare_run_context(
+            instance_uuid=instance_uuid,
+            execute_params=execute_params,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
+            existing_run_id=existing_run_id,
         )
-        return {
-            "execution": execution,
-            "workflow_instance": instance,
-            "runtime_plan": runtime_plan,
-            "restored_snapshot": restored_snapshot,
-            "payload": payload,
-            "external_context": external_context,
-            "trace_id": trace_id,
-        }
 
     def _build_event_persister(self, *, execution, workflow_instance: Workflow):
-        async def _persist(event_type: str, payload: Dict[str, Any]) -> None:
-            try:
-                await self.event_log_service.append_event(
-                    execution=execution,
-                    workflow_instance=workflow_instance,
-                    event_type=event_type,
-                    payload=payload,
-                )
-                await self.db.commit()
-            except Exception:
-                logger.exception("Failed to persist workflow event %s for run %s", event_type, execution.run_id)
-
-        return _persist
+        return self.run_execution_service.build_event_persister(
+            execution=execution,
+            workflow_instance=workflow_instance,
+        )
 
     def _to_run_summary(self, execution, latest_checkpoint) -> WorkflowRunSummaryRead:
-        status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
-        return WorkflowRunSummaryRead(
-            run_id=execution.run_id,
-            thread_id=execution.thread_id,
-            parent_run_id=execution.parent_run_id,
-            status=status_value,
-            trace_id=execution.trace_id,
-            error_code=execution.error_code,
-            error_message=execution.error_message,
-            started_at=execution.started_at,
-            finished_at=execution.finished_at,
-            latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
-        )
+        return self.run_query_service.build_run_summary(execution, latest_checkpoint)
 
     async def _get_latest_interrupt(
         self,
         *,
         execution_id: int,
     ) -> Optional[WorkflowInterruptRead]:
-        latest_interrupt = await self.event_log_service.get_latest_event(
-            execution_id=execution_id,
-            event_type="run.interrupted",
-        )
-        if latest_interrupt is None:
-            latest_interrupt = await self.event_log_service.get_latest_event(
-                execution_id=execution_id,
-                event_type="interrupt",
-            )
-        if latest_interrupt is None or not isinstance(latest_interrupt.payload, dict):
-            return None
-
-        interrupt_payload = latest_interrupt.payload.get("interrupt")
-        if not isinstance(interrupt_payload, dict):
-            return None
-
-        try:
-            return WorkflowInterruptRead.model_validate(interrupt_payload)
-        except ValidationError:
-            logger.warning("Invalid persisted workflow interrupt payload for execution %s", execution_id, exc_info=True)
-            return None
+        return await self.run_query_service.get_latest_interrupt(execution_id=execution_id)
 
     async def _resolve_resume_payload(
         self,
@@ -1264,76 +810,13 @@ class WorkflowService(ResourceImplementationService):
         parent_execution,
         execute_params: WorkflowExecutionRequest,
     ) -> Any:
-        if execute_params.resume is None:
-            return execute_params.meta.get("resume") if isinstance(execute_params.meta, dict) else None
-
-        resume_token = execute_params.resume.token
-        if resume_token is not None:
-            if resume_token.run_id != parent_execution.run_id:
-                raise ServiceException("Resume token run mismatch.")
-            if resume_token.thread_id != parent_execution.thread_id:
-                raise ServiceException("Resume token thread mismatch.")
-
-        resume_payload = execute_params.resume.output
-        interrupt = await self._get_latest_interrupt(execution_id=parent_execution.id)
-        resume_key = None
-        if interrupt is not None and isinstance(interrupt.payload, dict):
-            payload_resume_key = interrupt.payload.get("resumeOutputKey")
-            if isinstance(payload_resume_key, str) and payload_resume_key.strip():
-                resume_key = payload_resume_key.strip()
-            interrupt_token = interrupt.resume_token
-            if resume_token is not None and interrupt_token is not None and interrupt_token.node_id != resume_token.node_id:
-                raise ServiceException("Resume token node mismatch.")
-
-        if resume_key:
-            return {resume_key: resume_payload}
-        return resume_payload
+        return await self.run_query_service.resolve_resume_payload(
+            parent_execution=parent_execution,
+            execute_params=execute_params,
+        )
 
     async def get_run(self, run_id: str) -> WorkflowRunRead:
-        execution = await self.execution_ledger_service.get_by_run_id(run_id)
-        if execution is None:
-            raise NotFoundError("Workflow run not found.")
-
-        workflow_stub = await self.dao.get_by_pk(execution.resource_instance_id)
-        if workflow_stub is None:
-            raise NotFoundError("Workflow instance not found.")
-        workflow_instance = await self.get_by_uuid(workflow_stub.uuid)
-        if workflow_instance is None:
-            raise NotFoundError("Workflow instance not found.")
-
-        await self._check_execute_perm(workflow_instance)
-
-        latest_checkpoint = await self.runtime_persistence.get_latest_checkpoint(execution_id=execution.id)
-        node_executions = await self.runtime_persistence.node_execution_dao.get_list(
-            where={"resource_execution_id": execution.id},
-            order=["id"],
-        )
-        interrupt = await self._get_latest_interrupt(execution_id=execution.id)
-
-        status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
-        can_resume = status_value in {
-            ResourceExecutionStatus.FAILED.value,
-            ResourceExecutionStatus.CANCELLED.value,
-            ResourceExecutionStatus.INTERRUPTED.value,
-        } and latest_checkpoint is not None
-
-        return WorkflowRunRead(
-            run_id=execution.run_id,
-            thread_id=execution.thread_id,
-            parent_run_id=execution.parent_run_id,
-            status=status_value,
-            trace_id=execution.trace_id,
-            error_code=execution.error_code,
-            error_message=execution.error_message,
-            started_at=execution.started_at,
-            finished_at=execution.finished_at,
-            workflow_instance_uuid=workflow_instance.uuid,
-            workflow_name=workflow_instance.name,
-            latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
-            node_executions=[WorkflowRunNodeRead.model_validate(item) for item in node_executions],
-            can_resume=can_resume,
-            interrupt=interrupt,
-        )
+        return await self.run_query_service.get_run(run_id)
 
     async def list_run_events(
         self,
@@ -1341,20 +824,8 @@ class WorkflowService(ResourceImplementationService):
         *,
         limit: int = 1000,
     ) -> List[WorkflowEventRead]:
-        execution = await self.execution_ledger_service.get_by_run_id(run_id)
-        if execution is None:
-            raise NotFoundError("Workflow run not found.")
-
-        workflow_stub = await self.dao.get_by_pk(execution.resource_instance_id)
-        if workflow_stub is None:
-            raise NotFoundError("Workflow instance not found.")
-        workflow_instance = await self.get_by_uuid(workflow_stub.uuid)
-        if workflow_instance is None:
-            raise NotFoundError("Workflow instance not found.")
-        await self._check_execute_perm(workflow_instance)
-
-        return await self.event_log_service.list_events(
-            execution_id=execution.id,
+        return await self.run_query_service.list_run_events(
+            run_id,
             limit=limit,
         )
 
@@ -1364,66 +835,11 @@ class WorkflowService(ResourceImplementationService):
         *,
         after_seq: int = 0,
     ):
-        execution = await self.execution_ledger_service.get_by_run_id(run_id)
-        if execution is None:
-            raise NotFoundError("Workflow run not found.")
-
-        workflow_stub = await self.dao.get_by_pk(execution.resource_instance_id)
-        if workflow_stub is None:
-            raise NotFoundError("Workflow instance not found.")
-        workflow_instance = await self.get_by_uuid(workflow_stub.uuid)
-        if workflow_instance is None:
-            raise NotFoundError("Workflow instance not found.")
-        await self._check_execute_perm(workflow_instance)
-
-        current_seq = after_seq
-        seen_terminal_event = False
-        async for envelope in self.live_event_service.stream_events(run_id, after_seq=after_seq):
-            try:
-                current_seq = max(current_seq, int(envelope.get("seq", current_seq)))
-            except Exception:
-                pass
-            payload = envelope.get("payload", {})
-            if isinstance(payload, dict) and str(payload.get("event", "")) in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
-                seen_terminal_event = True
-            yield envelope
-
-        for event in await self.event_log_service.list_events_after_sequence(
-            execution_id=execution.id,
-            after_sequence_no=current_seq,
-            limit=1000,
+        async for envelope in self.run_query_service.stream_live_run_events(
+            run_id,
+            after_seq=after_seq,
         ):
-            if event.event_type in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
-                seen_terminal_event = True
-            yield {
-                "seq": event.sequence_no,
-                "payload": {
-                    "event": event.event_type,
-                    "data": event.payload,
-                },
-            }
-
-        if not seen_terminal_event:
-            await self.db.refresh(execution)
-            terminal_event_type = {
-                ResourceExecutionStatus.SUCCEEDED: "run.finished",
-                ResourceExecutionStatus.INTERRUPTED: "run.interrupted",
-                ResourceExecutionStatus.CANCELLED: "run.cancelled",
-                ResourceExecutionStatus.FAILED: "run.failed",
-            }.get(execution.status)
-            if terminal_event_type is not None:
-                terminal_event = await self.event_log_service.get_latest_event(
-                    execution_id=execution.id,
-                    event_type=terminal_event_type,
-                )
-                if terminal_event is not None and terminal_event.sequence_no >= after_seq:
-                    yield {
-                        "seq": terminal_event.sequence_no,
-                        "payload": {
-                            "event": terminal_event.event_type,
-                            "data": terminal_event.payload,
-                        },
-                    }
+            yield envelope
 
     async def list_runs(
         self,
@@ -1431,39 +847,7 @@ class WorkflowService(ResourceImplementationService):
         *,
         limit: int = 20,
     ) -> List[WorkflowRunSummaryRead]:
-        instance = await self.get_by_uuid(instance_uuid)
-        if instance is None:
-            raise NotFoundError("Workflow not found.")
-        await self._check_execute_perm(instance)
-
-        rows = await self.execution_ledger_service.dao.get_list(
-            where={"resource_instance_id": instance.id},
-            order=[
-                self.execution_ledger_service.dao.model.created_at.desc(),
-                self.execution_ledger_service.dao.model.id.desc(),
-            ],
-            limit=limit,
-        )
-
-        summaries: List[WorkflowRunSummaryRead] = []
-        for execution in rows:
-            latest_checkpoint = await self.runtime_persistence.get_latest_checkpoint(execution_id=execution.id)
-            status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
-            summaries.append(
-                WorkflowRunSummaryRead(
-                    run_id=execution.run_id,
-                    thread_id=execution.thread_id,
-                    parent_run_id=execution.parent_run_id,
-                    status=status_value,
-                    trace_id=execution.trace_id,
-                    error_code=execution.error_code,
-                    error_message=execution.error_message,
-                    started_at=execution.started_at,
-                    finished_at=execution.finished_at,
-                    latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
-                )
-            )
-        return summaries
+        return await self.run_query_service.list_runs(instance_uuid, limit=limit)
 
     async def debug_node_execute(
         self,
@@ -1492,50 +876,14 @@ class WorkflowService(ResourceImplementationService):
         node_id: str,
         execute_params: WorkflowExecutionRequest,
     ) -> WorkflowExecutionRequest:
-        instance = await self.get_by_uuid(instance_uuid)
-        if instance is None:
-            raise NotFoundError("Workflow not found.")
-        await self._check_execute_perm(instance)
-
-        graph_obj = WorkflowGraphDef.model_validate(instance.graph)
-        debug_graph = self._build_node_debug_graph(graph_obj, node_id)
-        meta = dict(execute_params.meta or {})
-        meta["_workflow_graph_override"] = debug_graph
-        debug_request = WorkflowExecutionRequest(
-            inputs=execute_params.inputs,
-            meta=meta,
-            thread_id=execute_params.thread_id,
-            parent_run_id=execute_params.parent_run_id,
-            resume_from_run_id=execute_params.resume_from_run_id,
-            resume=execute_params.resume,
+        return await self.run_preparation_service.build_debug_node_request(
+            instance_uuid=instance_uuid,
+            node_id=node_id,
+            execute_params=execute_params,
         )
-        return debug_request
 
     async def cancel_run(self, run_id: str) -> Dict[str, Any]:
-        execution = await self.execution_ledger_service.get_by_run_id(run_id)
-        if execution is None:
-            raise NotFoundError("Workflow run not found.")
-
-        workflow_stub = await self.dao.get_by_pk(execution.resource_instance_id)
-        if workflow_stub is None:
-            raise NotFoundError("Workflow instance not found.")
-        workflow_instance = await self.get_by_uuid(workflow_stub.uuid)
-        if workflow_instance is None:
-            raise NotFoundError("Workflow instance not found.")
-
-        await self._check_execute_perm(workflow_instance)
-
-        await self.context.redis_service.set_json(
-            WorkflowDurableRuntimeObserver.cancel_signal_key(run_id),
-            {"requested_at": datetime.now(UTC).replace(tzinfo=None).isoformat()},
-            expire=WorkflowDurableRuntimeObserver.CANCEL_SIGNAL_TTL,
-        )
-        local_cancelled = WorkflowTaskRegistry.cancel(run_id)
-        return {
-            "run_id": run_id,
-            "accepted": True,
-            "local_cancelled": local_cancelled,
-        }
+        return await self.run_control_service.cancel_run(run_id)
 
     def _build_node_debug_graph(self, graph_def: WorkflowGraphDef, node_id: str) -> Dict[str, Any]:
         analyzer = WorkflowGraph(graph_def)

@@ -43,9 +43,10 @@ async def test_run_attach_detaches_current_observer_without_cancelling_run():
     handler = WorkflowSessionHandler(SimpleNamespace(), SimpleNamespace(user=SimpleNamespace(uuid="user-1")))
     detached = {"value": False}
 
-    async def _fake_attach(run_id: str, *, after_seq: int = 0):
+    async def _fake_attach(run_id: str, *, after_seq: int = 0, protocol: str | None = None):
         assert run_id == "run-next"
         assert after_seq == 3
+        assert protocol == "wrp"
 
     previous_task = asyncio.create_task(asyncio.Event().wait())
     handler.current_task = previous_task
@@ -61,7 +62,7 @@ async def test_run_attach_detaches_current_observer_without_cancelling_run():
     assert previous_task.cancelled() is True
     assert handler.current_task is not None
     await handler.current_task
-    handler._attach_live_run.assert_awaited_once_with("run-next", after_seq=3)
+    handler._attach_live_run.assert_awaited_once_with("run-next", after_seq=3, protocol="wrp")
 
 
 @pytest.mark.asyncio
@@ -209,3 +210,22 @@ async def test_ui_event_abort_returns_not_enabled_protocol_error():
     payload = json.loads(websocket.send_text.await_args.args[0])
     assert payload["type"] == "run.failed"
     assert "ui.event.abort is not enabled" in payload["payload"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_protocol_returns_runtime_error():
+    websocket = SimpleNamespace(send_text=AsyncMock())
+    handler = WorkflowSessionHandler(websocket, SimpleNamespace(user=SimpleNamespace(uuid="user-1")))
+
+    await handler._dispatch_runtime_message(
+        WorkflowRuntimeRunAttachMessage.model_validate(
+            {
+                "protocol": "chatflow-ag-ui",
+                "runId": "run-1",
+            }
+        )
+    )
+
+    payload = json.loads(websocket.send_text.await_args.args[0])
+    assert payload["type"] == "run.failed"
+    assert "reserved but not implemented yet" in payload["payload"]["error"]

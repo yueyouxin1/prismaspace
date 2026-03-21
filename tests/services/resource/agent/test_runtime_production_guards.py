@@ -298,16 +298,8 @@ async def test_background_task_passes_resume_messages_as_delta_with_canonical_ch
         )
     )
     service.execution_ledger_service = SimpleNamespace(
-        get_by_run_id=AsyncMock(return_value=SimpleNamespace(id=99)),
         mark_running=AsyncMock(),
         mark_finished=AsyncMock(),
-    )
-    service.run_persistence_service = SimpleNamespace(
-        get_checkpoint=AsyncMock(
-            return_value=SimpleNamespace(
-                runtime_snapshot=resume_checkpoint.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-        )
     )
     service.live_event_service = SimpleNamespace(record_event=AsyncMock())
     service.db = SimpleNamespace(
@@ -362,6 +354,7 @@ async def test_background_task_passes_resume_messages_as_delta_with_canonical_ch
         adapted=adapted,
         tool_executor=SimpleNamespace(),
         agent_instance=SimpleNamespace(version_id=7, system_prompt="system"),
+        resume_checkpoint=resume_checkpoint,
     )
 
     assert captured["resume_checkpoint"] is not None
@@ -369,3 +362,232 @@ async def test_background_task_passes_resume_messages_as_delta_with_canonical_ch
     assert len(captured["agent_input"].messages) == 1
     assert captured["agent_input"].messages[0].role == "tool"
     assert captured["agent_input"].messages[0].tool_call_id == "call-1"
+
+
+async def test_background_task_loads_dependencies_once_when_pipeline_is_built(monkeypatch):
+    service = object.__new__(AgentService)
+    captured = {"dependencies": None}
+
+    class FakeTraceManager:
+        force_trace_id = "trace-1"
+
+        async def __aenter__(self):
+            return SimpleNamespace(attributes=None, set_output=lambda _result: None)
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    class FakePipelineManager:
+        def __init__(self, *, system_message, user_message, history, tool_executor):
+            self.tool_executor = tool_executor
+
+        def add_standard_processors(self, **kwargs):
+            captured["dependencies"] = kwargs.get("dependencies")
+            return self
+
+        async def build_context(self):
+            return [LLMMessage(role="user", content="hello")]
+
+        async def build_skill(self):
+            return []
+
+    class FakeAIProvider:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def execute_agent_with_billing(self, **kwargs):
+            result = AgentResult(
+                message=LLMMessage(role="assistant", content="done"),
+                steps=[],
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                outcome="completed",
+            )
+            await kwargs["callbacks"].on_agent_finish(result)
+            return result
+
+    monkeypatch.setattr(agent_service_module, "AgentPipelineManager", FakePipelineManager)
+
+    dependencies = [SimpleNamespace(alias="dep-1")]
+    service.ai_provider = FakeAIProvider()
+    service.context = SimpleNamespace(actor=SimpleNamespace(id=42))
+    service.ref_dao = SimpleNamespace(get_dependencies=AsyncMock(return_value=dependencies))
+    service.agent_memory_var_service = SimpleNamespace(get_runtime_object=AsyncMock(return_value={}))
+    service.prompt_template = SimpleNamespace(render=lambda template, variables: template)
+    service.module_service = SimpleNamespace(
+        get_runtime_context=AsyncMock(
+            return_value=SimpleNamespace(
+                version=SimpleNamespace(name="gpt-test", attributes={"context_window": 2048})
+            )
+        )
+    )
+    service.execution_ledger_service = SimpleNamespace(
+        mark_running=AsyncMock(),
+        mark_finished=AsyncMock(),
+    )
+    service.db = SimpleNamespace(refresh=AsyncMock(), commit=AsyncMock(), rollback=AsyncMock())
+    service._should_cancel_run = AsyncMock(return_value=False)
+    service._clear_cancel_run = AsyncMock()
+    service._delete_run_checkpoint = AsyncMock()
+    service._upsert_run_checkpoint = AsyncMock()
+    service._persist_agent_run_artifacts = AsyncMock()
+    service._resolve_model_context_window = AgentService._resolve_model_context_window
+    service.build_interrupt_id = AgentService.build_interrupt_id
+    service._session_lock = AsyncMock()
+
+    await service._run_agent_background_task(
+        agent_config=AgentConfig(),
+        llm_module_version=SimpleNamespace(id=1),
+        runtime_workspace=SimpleNamespace(id=9),
+        trace_manager=FakeTraceManager(),
+        generator_manager=AsyncGeneratorManager(),
+        execution=SimpleNamespace(id=1, run_id="run-1", thread_id="thread-1"),
+        turn_id="turn-1",
+        session_manager=None,
+        run_input=RunAgentInputExt.model_validate(
+            {
+                "threadId": "thread-1",
+                "runId": "run-1",
+                "state": {},
+                "messages": [{"id": "u1", "role": "user", "content": "hello"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"platform": {"sessionMode": "stateless"}},
+            }
+        ),
+        message_ids=AgentStreamMessageIds(
+            user_message_id="user-1",
+            assistant_message_id="assistant-1",
+            reasoning_message_id="reasoning-1",
+            activity_message_id="activity-1",
+        ),
+        dependencies=None,
+        adapted=ProtocolAdaptedRun(
+            input_content="hello",
+            thread_id="thread-1",
+            client_tools=[],
+            custom_history=[],
+            resume_messages=[],
+            has_custom_history=False,
+        ),
+        tool_executor=SimpleNamespace(),
+        agent_instance=SimpleNamespace(id=7, version_id=7, system_prompt="system"),
+    )
+
+    service.ref_dao.get_dependencies.assert_awaited_once_with(7)
+    assert captured["dependencies"] == dependencies
+
+
+async def test_background_task_skips_dependency_lookup_when_resume_checkpoint_is_present(monkeypatch):
+    service = object.__new__(AgentService)
+
+    class FakeTraceManager:
+        force_trace_id = "trace-1"
+
+        async def __aenter__(self):
+            return SimpleNamespace(attributes=None, set_output=lambda _result: None)
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    class FakeAIProvider:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def execute_agent_with_billing(self, **kwargs):
+            result = AgentResult(
+                message=LLMMessage(role="assistant", content="done"),
+                steps=[],
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                outcome="completed",
+            )
+            await kwargs["callbacks"].on_agent_finish(result)
+            return result
+
+    def fail_pipeline_manager(*args, **kwargs):
+        raise AssertionError("pipeline manager should not be constructed for resume checkpoint path")
+
+    monkeypatch.setattr(agent_service_module, "AgentPipelineManager", fail_pipeline_manager)
+
+    service.ai_provider = FakeAIProvider()
+    service.context = SimpleNamespace(actor=SimpleNamespace(id=42))
+    service.ref_dao = SimpleNamespace(get_dependencies=AsyncMock())
+    service.agent_memory_var_service = SimpleNamespace(get_runtime_object=AsyncMock())
+    service.prompt_template = SimpleNamespace(render=lambda template, variables: template)
+    service.module_service = SimpleNamespace(
+        get_runtime_context=AsyncMock(
+            return_value=SimpleNamespace(
+                version=SimpleNamespace(name="gpt-test", attributes={"context_window": 2048})
+            )
+        )
+    )
+    service.execution_ledger_service = SimpleNamespace(
+        mark_running=AsyncMock(),
+        mark_finished=AsyncMock(),
+    )
+    service.db = SimpleNamespace(refresh=AsyncMock(), commit=AsyncMock(), rollback=AsyncMock())
+    service._should_cancel_run = AsyncMock(return_value=False)
+    service._clear_cancel_run = AsyncMock()
+    service._delete_run_checkpoint = AsyncMock()
+    service._upsert_run_checkpoint = AsyncMock()
+    service._persist_agent_run_artifacts = AsyncMock()
+    service._resolve_model_context_window = AgentService._resolve_model_context_window
+    service.build_interrupt_id = AgentService.build_interrupt_id
+    service._session_lock = AsyncMock()
+
+    resume_checkpoint = AgentRuntimeCheckpoint(
+        phase="interrupt",
+        messages=[LLMMessage(role="tool", tool_call_id="call-1", content='{"approved": true}')],
+        tools=[],
+        pending_client_tool_calls=[],
+        next_iteration=1,
+    )
+
+    await service._run_agent_background_task(
+        agent_config=AgentConfig(),
+        llm_module_version=SimpleNamespace(id=1),
+        runtime_workspace=SimpleNamespace(id=9),
+        trace_manager=FakeTraceManager(),
+        generator_manager=AsyncGeneratorManager(),
+        execution=SimpleNamespace(id=1, run_id="run-1", thread_id="thread-1"),
+        turn_id="turn-1",
+        session_manager=None,
+        run_input=RunAgentInputExt.model_validate(
+            {
+                "threadId": "thread-1",
+                "runId": "run-1",
+                "state": {},
+                "messages": [{"id": "a1", "role": "assistant", "content": "waiting"}],
+                "tools": [],
+                "context": [],
+                "forwardedProps": {"platform": {"sessionMode": "stateless"}},
+            }
+        ),
+        message_ids=AgentStreamMessageIds(
+            user_message_id="user-1",
+            assistant_message_id="assistant-1",
+            reasoning_message_id="reasoning-1",
+            activity_message_id="activity-1",
+        ),
+        dependencies=None,
+        adapted=ProtocolAdaptedRun(
+            input_content="",
+            thread_id="thread-1",
+            client_tools=[],
+            custom_history=[],
+            resume_messages=[LLMMessage(role="tool", tool_call_id="call-1", content='{"approved": true}')],
+            has_custom_history=False,
+            resume_tool_call_ids=["call-1"],
+            resume_interrupt_id="parent-1",
+        ),
+        tool_executor=SimpleNamespace(),
+        agent_instance=SimpleNamespace(id=7, version_id=7, system_prompt="system"),
+        resume_checkpoint=resume_checkpoint,
+    )
+
+    service.ref_dao.get_dependencies.assert_not_awaited()
