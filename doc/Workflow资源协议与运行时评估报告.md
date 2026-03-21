@@ -4,6 +4,7 @@
 - 评估方式：基于当前工作树代码审查、现有文档比对与运行时契约梳理
 - 核心结论：**Workflow 运行时本身已经进入 durable runtime 阶段，但对外协议层仍停留在“产品内自定义事件流”阶段。**
 - 最终建议：**不要把 Workflow 原生协议直接等同于 AG-UI；应新增一套 Workflow 专用标准协议，并为 Agent 节点提供 AG-UI 兼容层，同时给未来 Chat Flow 预留扩展位。**
+- 当前落地：**WRP v1 已固化为对内协议说明，见 `doc/workflow-runtime-protocol.md`。**
 
 ---
 

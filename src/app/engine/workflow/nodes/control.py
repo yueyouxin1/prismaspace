@@ -72,6 +72,11 @@ class InterruptNode(BaseNode):
                     "runId": run_id,
                     "nodeId": self.node.id,
                     "resumeOutputKey": resume_key,
+                    "resumeToken": {
+                        "runId": run_id,
+                        "threadId": getattr(external_context, "thread_id", None),
+                        "nodeId": self.node.id,
+                    },
                 },
             )
         )

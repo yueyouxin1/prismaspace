@@ -126,10 +126,23 @@ class WorkflowEventRead(BaseModel):
             }
         return data
 
+class WorkflowResumeTokenRead(BaseModel):
+    run_id: str = Field(alias="runId")
+    thread_id: str = Field(alias="threadId")
+    node_id: str = Field(alias="nodeId")
+
+
+class WorkflowResumeRequest(BaseModel):
+    token: Optional[WorkflowResumeTokenRead] = Field(default=None, description="Resume token issued by the interrupted workflow event.")
+    output: Any = Field(default=None, description="Resume payload that will be injected back into the interrupted workflow.")
+    meta: Dict[str, Any] = Field(default_factory=dict, description="Optional resume metadata reserved for future UI or scope contracts.")
+
+
 class WorkflowExecutionRequest(ExecutionRequest):
     thread_id: Optional[str] = Field(default=None, description="逻辑执行线程 ID。")
     parent_run_id: Optional[str] = Field(default=None, description="上游运行 ID，用于 retry/regenerate 谱系。")
     resume_from_run_id: Optional[str] = Field(default=None, description="从指定 run_id 的最新 checkpoint 恢复。")
+    resume: Optional[WorkflowResumeRequest] = Field(default=None, description="Structured resume payload for interrupted workflow runs.")
 
 
 class WorkflowInterruptRead(BaseModel):
@@ -138,6 +151,18 @@ class WorkflowInterruptRead(BaseModel):
     reason: str
     message: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
+    resume_token: Optional[WorkflowResumeTokenRead] = Field(default=None, alias="resumeToken")
+
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process_interrupt(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("resumeToken") is None:
+            payload = data.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("resumeToken"), dict):
+                merged = dict(data)
+                merged["resumeToken"] = payload["resumeToken"]
+                return merged
+        return data
 
 
 class WorkflowExecutionResponseData(NodeResultData):
@@ -217,7 +242,7 @@ class WorkflowRunRead(BaseModel):
     run_id: str
     thread_id: str
     parent_run_id: Optional[str] = None
-    status: str
+    status: Literal["pending", "running", "succeeded", "failed", "cancelled", "interrupted"]
     trace_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
@@ -228,13 +253,14 @@ class WorkflowRunRead(BaseModel):
     latest_checkpoint: Optional[WorkflowCheckpointRead] = None
     node_executions: List[WorkflowRunNodeRead] = Field(default_factory=list)
     can_resume: bool = False
+    interrupt: Optional[WorkflowInterruptRead] = None
 
 
 class WorkflowRunSummaryRead(BaseModel):
     run_id: str
     thread_id: str
     parent_run_id: Optional[str] = None
-    status: str
+    status: Literal["pending", "running", "succeeded", "failed", "cancelled", "interrupted"]
     trace_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None

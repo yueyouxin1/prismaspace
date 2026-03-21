@@ -7,18 +7,20 @@ from app.db.base import Base
 
 
 class WorkflowExecutionEventType(str, enum.Enum):
-    START = "start"
-    NODE_START = "node_start"
-    NODE_FINISH = "node_finish"
-    NODE_ERROR = "node_error"
-    NODE_SKIPPED = "node_skipped"
-    STREAM_START = "stream_start"
-    STREAM_CHUNK = "stream_chunk"
-    STREAM_END = "stream_end"
-    INTERRUPT = "interrupt"
-    ERROR = "error"
-    FINISH = "finish"
-    SYSTEM_ERROR = "system_error"
+    RUN_STARTED = "run.started"
+    RUN_FINISHED = "run.finished"
+    RUN_FAILED = "run.failed"
+    RUN_CANCELLED = "run.cancelled"
+    RUN_INTERRUPTED = "run.interrupted"
+    NODE_STARTED = "node.started"
+    NODE_COMPLETED = "node.completed"
+    NODE_FAILED = "node.failed"
+    NODE_SKIPPED = "node.skipped"
+    STREAM_STARTED = "stream.started"
+    STREAM_DELTA = "stream.delta"
+    STREAM_FINISHED = "stream.finished"
+    CHECKPOINT_CREATED = "checkpoint.created"
+    SYSTEM_ERROR = "system.error"
 
 
 class WorkflowExecutionEvent(Base):

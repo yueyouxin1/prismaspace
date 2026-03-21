@@ -87,7 +87,7 @@ class WorkflowLiveEventService(BaseService):
     TERMINAL_TTL = timedelta(minutes=15)
     MAX_BUFFERED_EVENTS = 2000
     POLL_INTERVAL_SECONDS = 0.2
-    TERMINAL_EVENTS = {"finish", "error", "interrupt", "system_error"}
+    TERMINAL_EVENTS = {"run.finished", "run.failed", "run.cancelled", "run.interrupted", "system.error"}
 
     def __init__(self, context: AppContext):
         self.context = context

@@ -1,6 +1,7 @@
 # tests/api/v1/test_workflow_runtime.py
 
 import asyncio
+import json
 
 import pytest
 from httpx import AsyncClient
@@ -662,12 +663,14 @@ class TestWorkflowRuntimeApi:
         run_payload = run_response.json()["data"]
         assert run_payload["status"] == "interrupted"
         assert run_payload["can_resume"] is True
+        assert run_payload["interrupt"]["reason"] == "approval_required"
+        assert run_payload["interrupt"]["payload"]["resumeOutputKey"] == "resume"
 
         resume_response = await client.post(
             f"/api/v1/workflow/{instance_uuid}/execute",
             json={
                 "resume_from_run_id": run_id,
-                "meta": {"resume": {"resume": {"approved": True}}},
+                "resume": {"output": {"approved": True}},
             },
             headers=headers,
         )
@@ -769,6 +772,100 @@ class TestWorkflowRuntimeApi:
         assert debug_response.status_code == status.HTTP_200_OK, debug_response.text
         debug_payload = debug_response.json()["data"]["data"]
         assert debug_payload["output"]["echo"] == "echo:hello"
+
+    async def test_debug_node_stream_uses_workflow_runtime_protocol(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "debug_echo",
+                        "data": {
+                            "registryId": "DebugEchoNode",
+                            "name": "Echo",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "echo", "type": "string"}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "debug_echo", "path": "echo"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "debug_echo", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "debug_echo", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+
+        async with client.stream(
+            "POST",
+            f"/api/v1/workflow/{instance_uuid}/nodes/debug_echo/debug/sse",
+            json={"inputs": {"text": "hello-stream"}},
+            headers=headers,
+        ) as debug_response:
+            assert debug_response.status_code == status.HTTP_200_OK, debug_response.text
+            body = ""
+            async for chunk in debug_response.aiter_text():
+                body += chunk
+                if "event: run.finished" in body:
+                    break
+
+        assert "event: session.ready" in body
+        assert "event: node.completed" in body
+        assert "event: run.finished" in body
+        assert '"echo":"echo:hello-stream"' in body or '"echo": "echo:hello-stream"' in body
 
     async def test_subworkflow_node_executes_child_workflow_and_records_lineage(
         self,
@@ -980,8 +1077,8 @@ class TestWorkflowRuntimeApi:
         assert events_response.status_code == status.HTTP_200_OK, events_response.text
         events_payload = events_response.json()["data"]
         assert len(events_payload) >= 3
-        assert events_payload[0]["event_type"] == "start"
-        assert events_payload[-1]["event_type"] == "finish"
+        assert events_payload[0]["event_type"] == "run.started"
+        assert events_payload[-1]["event_type"] == "run.finished"
 
         async with client.stream(
             "GET",
@@ -993,8 +1090,8 @@ class TestWorkflowRuntimeApi:
             async for chunk in replay_response.aiter_text():
                 body += chunk
 
-        assert "event: start" in body
-        assert "event: finish" in body
+        assert "event: run.started" in body
+        assert "event: run.finished" in body
 
     async def test_workflow_live_endpoint_streams_detached_run_by_run_id(
         self,
@@ -1088,7 +1185,7 @@ class TestWorkflowRuntimeApi:
         )
 
         first_event = await run_result.generator.get()
-        assert first_event.event == "start"
+        assert first_event.event == "run.started"
         run_id = str(first_event.data["run_id"])
         assert first_event.id == "1"
         assert callable(run_result.detach)
@@ -1104,12 +1201,129 @@ class TestWorkflowRuntimeApi:
             body = ""
             async for chunk in live_response.aiter_text():
                 body += chunk
-                if "event: finish" in body:
+                if "event: run.finished" in body:
                     break
 
-        assert "event: node_start" in body
-        assert "event: finish" in body
+        assert "event: node.started" in body
+        assert "event: run.finished" in body
+        assert '"spec": "prismaspace.workflow.runtime/v1"' in body
         assert '"result": "echo:live-api"' in body
 
         if run_result.task:
             await run_result.task
+
+    async def test_sse_disconnect_does_not_cancel_background_workflow_run(
+        self,
+        client: AsyncClient,
+        auth_headers_factory: Callable,
+        registered_user_with_pro: UserContext,
+        workflow_resource: Resource,
+    ):
+        headers = await auth_headers_factory(registered_user_with_pro)
+        instance_uuid = workflow_resource.workspace_instance.uuid
+
+        graph_payload = {
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {
+                            "registryId": "Start",
+                            "name": "Start",
+                            "inputs": [],
+                            "outputs": [{"name": "text", "type": "string", "required": True, "open": True}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "slow",
+                        "data": {
+                            "registryId": "ApiSlowLiveNode",
+                            "name": "Slow",
+                            "inputs": [
+                                {
+                                    "name": "text",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "start", "path": "text"},
+                                    },
+                                }
+                            ],
+                            "outputs": [{"name": "echo", "type": "string", "required": True, "open": True}],
+                            "config": {},
+                        },
+                    },
+                    {
+                        "id": "end",
+                        "data": {
+                            "registryId": "End",
+                            "name": "End",
+                            "inputs": [
+                                {
+                                    "name": "result",
+                                    "type": "string",
+                                    "required": True,
+                                    "open": True,
+                                    "value": {
+                                        "type": "ref",
+                                        "content": {"blockID": "slow", "path": "echo"},
+                                    },
+                                }
+                            ],
+                            "outputs": [],
+                            "config": {"returnType": "Object"},
+                        },
+                    },
+                ],
+                "edges": [
+                    {"sourceNodeID": "start", "targetNodeID": "slow", "sourcePortID": "0", "targetPortID": "0"},
+                    {"sourceNodeID": "slow", "targetNodeID": "end", "sourcePortID": "0", "targetPortID": "0"},
+                ],
+            }
+        }
+
+        update_response = await client.put(
+            f"/api/v1/instances/{instance_uuid}",
+            json=graph_payload,
+            headers=headers,
+        )
+        assert update_response.status_code == status.HTTP_200_OK, update_response.text
+
+        run_id = None
+        async with client.stream(
+            "POST",
+            f"/api/v1/workflow/{instance_uuid}/sse",
+            json={"inputs": {"text": "disconnect-api"}},
+            headers=headers,
+        ) as stream_response:
+            assert stream_response.status_code == status.HTTP_200_OK, stream_response.text
+            body = ""
+            async for chunk in stream_response.aiter_text():
+                body += chunk
+                if "event: run.started" in body:
+                    break
+            for part in body.split("\n\n"):
+                if "event: run.started" not in part or "data: " not in part:
+                    continue
+                payload = part.split("data: ", 1)[1]
+                run_id = json.loads(payload)["runId"]
+                break
+
+        assert isinstance(run_id, str)
+
+        for _ in range(30):
+            run_response = await client.get(
+                f"/api/v1/workflow/runs/{run_id}",
+                headers=headers,
+            )
+            assert run_response.status_code == status.HTTP_200_OK, run_response.text
+            run_payload = run_response.json()["data"]
+            if run_payload["status"] != "running":
+                break
+            await asyncio.sleep(0.1)
+
+        assert run_payload["status"] == "succeeded"
+

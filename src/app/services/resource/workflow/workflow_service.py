@@ -126,7 +126,7 @@ class WorkflowStreamCallbacks(WorkflowCallbacks):
     async def on_execution_start(self, workflow_def: WorkflowRuntimePlan) -> None:
         await self._safe_put(
             WorkflowEvent(
-                event="start",
+                event="run.started",
                 data={
                     "trace_id": self.trace_id,
                     "run_id": self.run_id,
@@ -136,37 +136,36 @@ class WorkflowStreamCallbacks(WorkflowCallbacks):
         )
 
     async def on_node_start(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node_start", data=state.model_dump()))
+        await self._safe_put(WorkflowEvent(event="node.started", data=state.model_dump()))
 
     async def on_node_finish(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node_finish", data=state.model_dump()))
+        await self._safe_put(WorkflowEvent(event="node.completed", data=state.model_dump()))
 
     async def on_node_error(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node_error", data=state.model_dump()))
+        await self._safe_put(WorkflowEvent(event="node.failed", data=state.model_dump()))
 
     async def on_node_skipped(self, state: NodeState) -> None:
-        await self._safe_put(WorkflowEvent(event="node_skipped", data=state.model_dump()))
+        await self._safe_put(WorkflowEvent(event="node.skipped", data=state.model_dump()))
 
     async def on_stream_start(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream_start", data=event.model_dump()))
+        await self._safe_put(WorkflowEvent(event="stream.started", data=event.model_dump()))
 
     async def on_stream_chunk(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream_chunk", data=event.model_dump()))
+        await self._safe_put(WorkflowEvent(event="stream.delta", data=event.model_dump()))
         
     async def on_stream_end(self, event: StreamEvent) -> None:
-        await self._safe_put(WorkflowEvent(event="stream_end", data=event.model_dump()))
+        await self._safe_put(WorkflowEvent(event="stream.finished", data=event.model_dump()))
 
     async def on_execution_end(self, result: NodeResultData) -> None:
         payload = result.model_dump(mode="json")
         payload.update({"run_id": self.run_id, "thread_id": self.thread_id})
-        await self._safe_put(WorkflowEvent(event="finish", data=payload))
+        await self._safe_put(WorkflowEvent(event="run.finished", data=payload))
 
     async def on_event(self, type: str, data: Any) -> None:
-        if type not in ["execution_start", "node_start", "node_finish", "node_error", "node_skipped", "stream_chunk", "execution_end"]:
-            payload = data if isinstance(data, dict) else {"detail": data}
-            payload.setdefault("run_id", self.run_id)
-            payload.setdefault("thread_id", self.thread_id)
-            await self._safe_put(WorkflowEvent(event=type, data=payload))
+        payload = data if isinstance(data, dict) else {"detail": data}
+        payload.setdefault("run_id", self.run_id)
+        payload.setdefault("thread_id", self.thread_id)
+        await self._safe_put(WorkflowEvent(event=type, data=payload))
 
 @register_service
 class WorkflowService(ResourceImplementationService):
@@ -770,25 +769,27 @@ class WorkflowService(ResourceImplementationService):
                 execute_params,
                 actor,
                 runtime_workspace,
-            )
+            ) 
             task = result.task
             run_id = result.run_id
             thread_id = result.thread_id
             trace_id = result.trace_id
             async for event in result.generator:
-                if event.event == "start":
+                if event.event == "run.started":
                     trace_id = event.data.get("trace_id") or trace_id
                     run_id = event.data.get("run_id") or run_id
                     thread_id = event.data.get("thread_id") or thread_id
-                elif event.event == "finish":
+                elif event.event == "run.finished":
                     final_output = event.data.get("output")
                     outcome = event.data.get("outcome") or outcome
-                elif event.event == "error":
+                elif event.event == "run.failed":
                     error_msg = event.data.get("error") if isinstance(event.data, dict) else str(event.data)
                     raise ServiceException(f"Workflow execution failed: {error_msg}")
-                elif event.event == "interrupt":
+                elif event.event == "run.interrupted":
                     interrupt_payload = event.data.get("interrupt") if isinstance(event.data, dict) else None
                     outcome = "interrupt"
+                elif event.event == "run.cancelled":
+                    outcome = "cancelled"
         except Exception as exc:
             raise ServiceException(f"Workflow failed: {exc}")
         finally:
@@ -968,6 +969,7 @@ class WorkflowService(ResourceImplementationService):
             execution=execution,
             workflow_instance=workflow_instance,
             runtime_plan=runtime_plan,
+            event_callback=callbacks.on_event,
         )
 
         try:
@@ -1001,7 +1003,7 @@ class WorkflowService(ResourceImplementationService):
         except WorkflowInterruptSignal as interrupt_exc:
             interrupt_payload = interrupt_exc.interrupt.model_dump(mode="json")
             await callbacks.on_event(
-                "interrupt",
+                "run.interrupted",
                 {
                     "interrupt": interrupt_payload,
                     "outcome": "interrupt",
@@ -1025,7 +1027,7 @@ class WorkflowService(ResourceImplementationService):
             )
             await self.db.commit()
             await callbacks.on_event(
-                "finish",
+                "run.cancelled",
                 {
                     "output": {},
                     "outcome": "cancelled",
@@ -1036,7 +1038,7 @@ class WorkflowService(ResourceImplementationService):
             raise
         except Exception as exc:
             logger.error("Workflow execution error: %s", exc, exc_info=True)
-            await callbacks.on_event("error", {"error": str(exc)})
+            await callbacks.on_event("run.failed", {"error": str(exc)})
             status = ResourceExecutionStatus.CANCELLED if await runtime_observer.should_cancel() else ResourceExecutionStatus.FAILED
             error_code = "WORKFLOW_CANCELLED" if status == ResourceExecutionStatus.CANCELLED else "WORKFLOW_EXECUTION_ERROR"
             await self.execution_ledger_service.mark_finished(
@@ -1127,7 +1129,6 @@ class WorkflowService(ResourceImplementationService):
         if resume_from_run_id:
             if payload:
                 raise ServiceException("Resume execution does not accept new inputs.")
-            resume_payload = execute_params.meta.get("resume") if isinstance(execute_params.meta, dict) else None
             parent_execution = await self.execution_ledger_service.get_by_run_id(resume_from_run_id)
             if not parent_execution:
                 raise NotFoundError("Resume target run not found.")
@@ -1135,6 +1136,10 @@ class WorkflowService(ResourceImplementationService):
                 raise ServiceException("Resume target does not belong to this workflow or actor.")
             if parent_execution.status == ResourceExecutionStatus.RUNNING:
                 raise ServiceException("Cannot resume a workflow that is still running.")
+            resume_payload = await self._resolve_resume_payload(
+                parent_execution=parent_execution,
+                execute_params=execute_params,
+            )
 
             checkpoint = await self.runtime_persistence.get_latest_checkpoint(execution_id=parent_execution.id)
             if checkpoint is None:
@@ -1226,6 +1231,64 @@ class WorkflowService(ResourceImplementationService):
             latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
         )
 
+    async def _get_latest_interrupt(
+        self,
+        *,
+        execution_id: int,
+    ) -> Optional[WorkflowInterruptRead]:
+        latest_interrupt = await self.event_log_service.get_latest_event(
+            execution_id=execution_id,
+            event_type="run.interrupted",
+        )
+        if latest_interrupt is None:
+            latest_interrupt = await self.event_log_service.get_latest_event(
+                execution_id=execution_id,
+                event_type="interrupt",
+            )
+        if latest_interrupt is None or not isinstance(latest_interrupt.payload, dict):
+            return None
+
+        interrupt_payload = latest_interrupt.payload.get("interrupt")
+        if not isinstance(interrupt_payload, dict):
+            return None
+
+        try:
+            return WorkflowInterruptRead.model_validate(interrupt_payload)
+        except ValidationError:
+            logger.warning("Invalid persisted workflow interrupt payload for execution %s", execution_id, exc_info=True)
+            return None
+
+    async def _resolve_resume_payload(
+        self,
+        *,
+        parent_execution,
+        execute_params: WorkflowExecutionRequest,
+    ) -> Any:
+        if execute_params.resume is None:
+            return execute_params.meta.get("resume") if isinstance(execute_params.meta, dict) else None
+
+        resume_token = execute_params.resume.token
+        if resume_token is not None:
+            if resume_token.run_id != parent_execution.run_id:
+                raise ServiceException("Resume token run mismatch.")
+            if resume_token.thread_id != parent_execution.thread_id:
+                raise ServiceException("Resume token thread mismatch.")
+
+        resume_payload = execute_params.resume.output
+        interrupt = await self._get_latest_interrupt(execution_id=parent_execution.id)
+        resume_key = None
+        if interrupt is not None and isinstance(interrupt.payload, dict):
+            payload_resume_key = interrupt.payload.get("resumeOutputKey")
+            if isinstance(payload_resume_key, str) and payload_resume_key.strip():
+                resume_key = payload_resume_key.strip()
+            interrupt_token = interrupt.resume_token
+            if resume_token is not None and interrupt_token is not None and interrupt_token.node_id != resume_token.node_id:
+                raise ServiceException("Resume token node mismatch.")
+
+        if resume_key:
+            return {resume_key: resume_payload}
+        return resume_payload
+
     async def get_run(self, run_id: str) -> WorkflowRunRead:
         execution = await self.execution_ledger_service.get_by_run_id(run_id)
         if execution is None:
@@ -1245,6 +1308,7 @@ class WorkflowService(ResourceImplementationService):
             where={"resource_execution_id": execution.id},
             order=["id"],
         )
+        interrupt = await self._get_latest_interrupt(execution_id=execution.id)
 
         status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
         can_resume = status_value in {
@@ -1268,6 +1332,7 @@ class WorkflowService(ResourceImplementationService):
             latest_checkpoint=self.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
             node_executions=[WorkflowRunNodeRead.model_validate(item) for item in node_executions],
             can_resume=can_resume,
+            interrupt=interrupt,
         )
 
     async def list_run_events(
@@ -1311,8 +1376,54 @@ class WorkflowService(ResourceImplementationService):
             raise NotFoundError("Workflow instance not found.")
         await self._check_execute_perm(workflow_instance)
 
+        current_seq = after_seq
+        seen_terminal_event = False
         async for envelope in self.live_event_service.stream_events(run_id, after_seq=after_seq):
+            try:
+                current_seq = max(current_seq, int(envelope.get("seq", current_seq)))
+            except Exception:
+                pass
+            payload = envelope.get("payload", {})
+            if isinstance(payload, dict) and str(payload.get("event", "")) in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
+                seen_terminal_event = True
             yield envelope
+
+        for event in await self.event_log_service.list_events_after_sequence(
+            execution_id=execution.id,
+            after_sequence_no=current_seq,
+            limit=1000,
+        ):
+            if event.event_type in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
+                seen_terminal_event = True
+            yield {
+                "seq": event.sequence_no,
+                "payload": {
+                    "event": event.event_type,
+                    "data": event.payload,
+                },
+            }
+
+        if not seen_terminal_event:
+            await self.db.refresh(execution)
+            terminal_event_type = {
+                ResourceExecutionStatus.SUCCEEDED: "run.finished",
+                ResourceExecutionStatus.INTERRUPTED: "run.interrupted",
+                ResourceExecutionStatus.CANCELLED: "run.cancelled",
+                ResourceExecutionStatus.FAILED: "run.failed",
+            }.get(execution.status)
+            if terminal_event_type is not None:
+                terminal_event = await self.event_log_service.get_latest_event(
+                    execution_id=execution.id,
+                    event_type=terminal_event_type,
+                )
+                if terminal_event is not None and terminal_event.sequence_no >= after_seq:
+                    yield {
+                        "seq": terminal_event.sequence_no,
+                        "payload": {
+                            "event": terminal_event.event_type,
+                            "data": terminal_event.payload,
+                        },
+                    }
 
     async def list_runs(
         self,
@@ -1362,6 +1473,25 @@ class WorkflowService(ResourceImplementationService):
         actor: User,
         runtime_workspace: Optional[Workspace] = None,
     ) -> WorkflowExecutionResponse:
+        debug_request = await self.build_debug_node_request(
+            instance_uuid=instance_uuid,
+            node_id=node_id,
+            execute_params=execute_params,
+        )
+        return await self.execute(
+            instance_uuid=instance_uuid,
+            execute_params=debug_request,
+            actor=actor,
+            runtime_workspace=runtime_workspace,
+        )
+
+    async def build_debug_node_request(
+        self,
+        *,
+        instance_uuid: str,
+        node_id: str,
+        execute_params: WorkflowExecutionRequest,
+    ) -> WorkflowExecutionRequest:
         instance = await self.get_by_uuid(instance_uuid)
         if instance is None:
             raise NotFoundError("Workflow not found.")
@@ -1377,13 +1507,9 @@ class WorkflowService(ResourceImplementationService):
             thread_id=execute_params.thread_id,
             parent_run_id=execute_params.parent_run_id,
             resume_from_run_id=execute_params.resume_from_run_id,
+            resume=execute_params.resume,
         )
-        return await self.execute(
-            instance_uuid=instance_uuid,
-            execute_params=debug_request,
-            actor=actor,
-            runtime_workspace=runtime_workspace,
-        )
+        return debug_request
 
     async def cancel_run(self, run_id: str) -> Dict[str, Any]:
         execution = await self.execution_ledger_service.get_by_run_id(run_id)
