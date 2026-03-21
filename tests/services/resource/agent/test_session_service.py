@@ -76,3 +76,58 @@ async def test_batch_append_messages_and_delete_message_track_turn_count(
     await db_session.refresh(session)
     assert session.message_count == 1
     assert session.turn_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_session_history_returns_latest_page_in_chronological_order(
+    created_resource_factory,
+    db_session,
+    app_context_factory,
+    registered_user_with_pro,
+):
+    resource = await created_resource_factory("agent")
+    agent_instance = await ResourceInstanceDao(db_session).get_by_uuid(resource.workspace_instance.uuid)
+    assert agent_instance is not None
+
+    context = await app_context_factory(actor=registered_user_with_pro.user)
+    service = AgentSessionService(context)
+    session = await service.get_or_create_session(
+        session_uuid=str(uuid.uuid4()),
+        agent_instance=agent_instance,
+        actor=registered_user_with_pro.user,
+    )
+
+    await service.batch_append_messages(
+        session=session,
+        messages_data=[
+            {
+                "message_uuid": "history-user-1",
+                "role": AgentMessageRole.USER,
+                "text_content": "first",
+                "run_id": "history-run-1",
+                "turn_id": "history-turn-1",
+            },
+            {
+                "message_uuid": "history-assistant-1",
+                "role": AgentMessageRole.ASSISTANT,
+                "text_content": "second",
+                "run_id": "history-run-1",
+                "turn_id": "history-turn-1",
+            },
+            {
+                "message_uuid": "history-user-2",
+                "role": AgentMessageRole.USER,
+                "text_content": "third",
+                "run_id": "history-run-2",
+                "turn_id": "history-turn-2",
+            },
+        ],
+    )
+
+    history = await service.get_session_history(session.uuid, 0, 3, registered_user_with_pro.user)
+
+    assert [message.uuid for message in history] == [
+        "history-user-1",
+        "history-assistant-1",
+        "history-user-2",
+    ]

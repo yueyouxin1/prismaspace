@@ -182,16 +182,23 @@ class AgentMessageDao(BaseDao[AgentMessage]):
         # 定义中“清空”意味着“屏幕清空”。所以前端也不应该拉取到。
         where = [
             AgentMessage.session_id == session_id,
-            AgentMessage.is_deleted == False
+            AgentMessage.is_deleted == False,
         ]
         if cursor_id > 0:
             where.append(AgentMessage.id < cursor_id)
-            
-        return await self.get_list(
-            where=where,
-            order=[desc(AgentMessage.id)],
-            limit=limit
+
+        # 先按主键倒序截取“最新一页”，再在 Python 侧翻转成前端所需的时间正序，
+        # 避免同秒 created_at 导致的顺序不稳定。
+        stmt = (
+            select(AgentMessage)
+            .where(*where)
+            .order_by(desc(AgentMessage.id))
+            .limit(limit)
         )
+        result = await self.db_session.execute(stmt)
+        messages = list(result.scalars().all())
+        messages.reverse()
+        return messages
 
     async def soft_delete_by_session(self, session_id: int):
         """[生产模式] 软删除会话下的所有消息"""
