@@ -344,10 +344,38 @@ class WorkflowService(ResourceImplementationService):
                                     ancestors,
                                 )
                             )
+            if hasattr(cfg, "assignments"):
+                for idx, assignment in enumerate(getattr(cfg, "assignments") or []):
+                    left = assignment.get("left") if isinstance(assignment, dict) else getattr(assignment, "left", None)
+                    right = assignment.get("right") if isinstance(assignment, dict) else getattr(assignment, "right", None)
+                    left_schema = self._as_parameter_schema(left)
+                    right_schema = self._as_parameter_schema(right)
+                    if left_schema:
+                        errors.extend(
+                            self._validate_refs_for_single_schema(
+                                node.id,
+                                left_schema,
+                                f"config.assignments[{idx}].left",
+                                node_map,
+                                ancestors,
+                            )
+                        )
+                    if right_schema:
+                        errors.extend(
+                            self._validate_refs_for_single_schema(
+                                node.id,
+                                right_schema,
+                                f"config.assignments[{idx}].right",
+                                node_map,
+                                ancestors,
+                            )
+                        )
 
             # C. Loop 节点的专项校验（内层 blocks + loop 输出引用）
             if node.data.registryId == "Loop":
                 errors.extend(self._validate_loop_node(node))
+            elif node.data.registryId == "SetVariable":
+                errors.extend(self._validate_set_variable_node(node))
 
         return errors
 
@@ -414,6 +442,7 @@ class WorkflowService(ResourceImplementationService):
         loop_type = getattr(config, "loopType", "count")
         loop_count = self._as_parameter_schema(getattr(config, "loopCount", None))
         loop_list = self._as_parameter_schema(getattr(config, "loopList", None))
+        loop_item_alias = loop_list.name if loop_list and getattr(loop_list, "name", None) else ""
 
         # A. Loop 核心配置校验
         if loop_type == "count":
@@ -436,6 +465,17 @@ class WorkflowService(ResourceImplementationService):
 
         # C. 校验 loop outputs 中 source=loop-block-output 的引用
         for schema_path, ref in self._collect_schema_refs(loop_node.data.outputs or [], "outputs"):
+            if ref.get("blockID") == loop_node.id and ref.get("source") != "loop-block-output":
+                ref_path = ref.get("path", "").strip()
+                if ref_path in {"index", "item"}:
+                    continue
+                if loop_item_alias and ref_path == loop_item_alias:
+                    continue
+                if not self._path_exists_in_schemas(loop_node.data.inputs or [], ref_path):
+                    errors.append(
+                        f"Node {loop_node.id}: {schema_path} references Loop.{ref_path}, but it is not a loop variable."
+                    )
+                continue
             if ref.get("source") != "loop-block-output":
                 continue
             ref_block = ref.get("blockID", "").strip()
@@ -475,7 +515,7 @@ class WorkflowService(ResourceImplementationService):
                     continue
 
                 if ref_block == loop_node.id:
-                    if ref_path in {"index", "item"}:
+                    if ref_path in {"index", "item"} or (loop_item_alias and ref_path == loop_item_alias):
                         continue
                     if not self._path_exists_in_schemas(loop_input_schemas, ref_path):
                         errors.append(
@@ -500,7 +540,132 @@ class WorkflowService(ResourceImplementationService):
                     errors.append(
                         f"Node {block.id}: {schema_path} path '{ref_path}' not found in loop block '{ref_block}' outputs."
                     )
+                    
+            if block.data.registryId == "SetVariable":
+                assignments = getattr(block.data.config, "assignments", None) or []
+                if not assignments:
+                    errors.append(f"Node {block.id}: SetVariable requires at least one assignment.")
+                for idx, assignment in enumerate(assignments):
+                    left = assignment.get("left") if isinstance(assignment, dict) else getattr(assignment, "left", None)
+                    right = assignment.get("right") if isinstance(assignment, dict) else getattr(assignment, "right", None)
+                    left_schema = self._as_parameter_schema(left)
+                    right_schema = self._as_parameter_schema(right)
+                    if left_schema:
+                        errors.extend(
+                            self._validate_loop_block_ref_schema(
+                                loop_node=loop_node,
+                                block_map=block_map,
+                                block_ancestors=block_ancestors,
+                                block=block,
+                                schema=left_schema,
+                                schema_path=f"config.assignments[{idx}].left",
+                                allow_loop_block_output=False,
+                                set_variable_target=True,
+                                loop_item_alias=loop_item_alias,
+                            )
+                        )
+                    if right_schema:
+                        errors.extend(
+                            self._validate_loop_block_ref_schema(
+                                loop_node=loop_node,
+                                block_map=block_map,
+                                block_ancestors=block_ancestors,
+                                block=block,
+                                schema=right_schema,
+                                schema_path=f"config.assignments[{idx}].right",
+                                allow_loop_block_output=False,
+                                set_variable_target=False,
+                                loop_item_alias=loop_item_alias,
+                            )
+                        )
 
+        if execution_mode := getattr(config, "executionMode", "serial"):
+            if execution_mode == "parallel":
+                if any(block.data.registryId == "SetVariable" for block in blocks):
+                    errors.append(
+                        f"Node {loop_node.id}: executionMode=parallel does not support SetVariable in loop blocks."
+                    )
+
+        return errors
+
+    def _validate_set_variable_node(self, node: Any) -> List[str]:
+        errors: List[str] = []
+        errors.append(f"Node {node.id}: SetVariable can only be used inside a Loop body.")
+        assignments = getattr(node.data.config, "assignments", None) or []
+        if not assignments:
+            errors.append(f"Node {node.id}: SetVariable requires at least one assignment.")
+        return errors
+
+    def _validate_loop_block_ref_schema(
+        self,
+        *,
+        loop_node: Any,
+        block_map: Dict[str, Any],
+        block_ancestors: Dict[str, Set[str]],
+        block: Any,
+        schema: ParameterSchema,
+        schema_path: str,
+        allow_loop_block_output: bool,
+        set_variable_target: bool,
+        loop_item_alias: str,
+    ) -> List[str]:
+        errors: List[str] = []
+        loop_input_schemas = loop_node.data.inputs or []
+        ref_entries = self._collect_schema_refs([schema], prefix=schema_path)
+        for path, ref in ref_entries:
+            ref_block = ref.get("blockID", "").strip()
+            ref_path = ref.get("path", "").strip()
+            if not ref_block:
+                errors.append(f"Node {block.id}: {path} has empty ref.blockID.")
+                continue
+            if not ref_path:
+                errors.append(f"Node {block.id}: {path} has empty ref.path.")
+                continue
+            if ref.get("source") == "loop-block-output":
+                if not allow_loop_block_output:
+                    errors.append(
+                        f"Node {block.id}: {path} cannot use source=loop-block-output inside loop blocks."
+                    )
+                continue
+
+            if ref_block == loop_node.id:
+                if set_variable_target:
+                    if ref_path in {"index", "item"} or (loop_item_alias and ref_path == loop_item_alias):
+                        errors.append(
+                            f"Node {block.id}: {path} cannot overwrite loop index/item variables."
+                        )
+                    elif not self._path_exists_in_schemas(loop_input_schemas, ref_path):
+                        errors.append(
+                            f"Node {block.id}: {path} references unknown loop variable '{ref_path}'."
+                        )
+                    continue
+
+                if ref_path in {"index", "item"} or (loop_item_alias and ref_path == loop_item_alias):
+                    continue
+                if not self._path_exists_in_schemas(loop_input_schemas, ref_path):
+                    errors.append(
+                        f"Node {block.id}: {path} references Loop.{ref_path}, but it is neither index/item nor a loop input."
+                    )
+                continue
+
+            if ref_block not in block_map:
+                errors.append(
+                    f"Node {block.id}: {path} references unknown loop block '{ref_block}'."
+                )
+                continue
+
+            if ref_block not in block_ancestors.get(block.id, set()):
+                errors.append(
+                    f"Node {block.id}: {path} references non-upstream loop block '{ref_block}'."
+                )
+                continue
+
+            source_schemas = block_map[ref_block].data.outputs or []
+            if not self._path_exists_in_schemas(source_schemas, ref_path):
+                errors.append(
+                    f"Node {block.id}: {path} path '{ref_path}' not found in loop block '{ref_block}' outputs."
+                )
+                
         return errors
 
     def _build_ancestor_map(self, analyzer: WorkflowGraph) -> Dict[str, Set[str]]:

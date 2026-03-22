@@ -6,7 +6,7 @@ from ...utils.data_parser import get_value_by_path, get_value_by_expr_template
 from ...utils.stream import StreamBroadcaster
 from ..registry import register_node, BaseNode, WorkflowRuntimeContext
 from ..definitions import WorkflowInterrupt, WorkflowInterruptSignal, WorkflowNode, NodeResultData, ParameterSchema, NodeExecutionResult, StreamEvent
-from .template import START_TEMPLATE, END_TEMPLATE, OUTPUT_TEMPLATE, BRANCH_TEMPLATE, INTERRUPT_TEMPLATE
+from .template import START_TEMPLATE, END_TEMPLATE, OUTPUT_TEMPLATE, BRANCH_TEMPLATE, INTERRUPT_TEMPLATE, SET_VARIABLE_TEMPLATE
 
 # ============================================================================
 # 1. Start Node
@@ -279,3 +279,64 @@ class BranchNode(BaseNode):
 
         # Branch 节点本身不输出数据，只决定流向
         return NodeExecutionResult(input={}, data=NodeResultData(output={}), activated_port=activated_port)
+
+
+def _set_value_by_path(target: Dict[str, Any], path: str, value: Any) -> None:
+    parts = [part for part in str(path).split('.') if part]
+    if not parts:
+        return
+    cursor: Dict[str, Any] = target
+    for part in parts[:-1]:
+        next_value = cursor.get(part)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            cursor[part] = next_value
+        cursor = next_value
+    cursor[parts[-1]] = value
+
+
+@register_node(template=SET_VARIABLE_TEMPLATE)
+class SetVariableNode(BaseNode):
+    """
+    循环变量设置节点。
+    将配置中的 left(ref) <- right(value/ref) 赋值写回到 loop 变量容器。
+    """
+
+    async def _resolve_value(self, schema: ParameterSchema) -> Any:
+        temp_key = schema.name or "set_value"
+        schema_copy = schema.model_copy()
+        schema_copy.name = temp_key
+        result_dict = await schemas2obj([schema_copy], self.context.variables)
+        return result_dict.get(temp_key)
+
+    async def execute(self) -> NodeExecutionResult:
+        assignments = getattr(self.node.data.config, "assignments", []) or []
+        updated_output: Dict[str, Any] = {}
+
+        for assignment in assignments:
+            left_schema = assignment.left
+            left_value = getattr(left_schema, "value", None)
+            if left_value is None or getattr(left_value, "type", None) != "ref":
+                raise ValueError("SetVariable.left must be a ref value.")
+
+            ref_content = left_value.content
+            block_id = getattr(ref_content, "blockID", "")
+            ref_path = getattr(ref_content, "path", "")
+            if not block_id or not ref_path:
+                raise ValueError("SetVariable.left ref must include blockID and path.")
+
+            if ref_path in {"index", "item"}:
+                raise ValueError("SetVariable cannot overwrite loop index/item.")
+
+            target_container = self.context.variables.get(block_id)
+            if not isinstance(target_container, dict):
+                raise ValueError(f"SetVariable target '{block_id}' is not mutable.")
+
+            next_value = await self._resolve_value(assignment.right)
+            _set_value_by_path(target_container, ref_path, next_value)
+            updated_output[ref_path] = next_value
+
+        return NodeExecutionResult(
+            input={"assignments": len(assignments)},
+            data=NodeResultData(output=updated_output),
+        )

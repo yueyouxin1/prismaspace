@@ -115,11 +115,12 @@ class LoopNode(BaseNode):
         self,
         *,
         loop_node_id: str,
-        node_input: Dict[str, Any],
+        mutable_state: Dict[str, Any],
         loop_sub_outputs_schema: List[ParameterSchema],
         index: int,
         item: Any,
-    ) -> Dict[str, Any]:
+        item_alias: str,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         _, _, sub_graph_def = self._create_standard_sub_workflow(
             loop_node_id,
             self.node.data.inputs,
@@ -130,8 +131,10 @@ class LoopNode(BaseNode):
         loop_variables = {
             "index": index,
             "item": item,
-            **node_input
+            **mutable_state,
         }
+        if item_alias and item_alias not in {"index", "item"} and item_alias not in loop_variables:
+            loop_variables[item_alias] = item
         context_for_subflow = {
             **self.context.variables,
             loop_node_id: loop_variables
@@ -142,7 +145,11 @@ class LoopNode(BaseNode):
             payload=self.context.payload
         )
         iteration_result_raw = await sub_executor.execute()
-        return iteration_result_raw.output
+        next_mutable_state = {
+            key: loop_variables.get(key)
+            for key in mutable_state.keys()
+        }
+        return iteration_result_raw.output, next_mutable_state
 
     async def execute(self) -> NodeExecutionResult:
         # 1. 解析基础配置
@@ -167,7 +174,10 @@ class LoopNode(BaseNode):
             loop_data = raw_list if isinstance(raw_list, list) else []
 
         # 解析 Loop 节点自身的 inputs (作为子流程的上下文基础)
-        node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
+        mutable_state = await schemas2obj(self.node.data.inputs, self.context.variables)
+        item_alias = ""
+        if loop_type == "list":
+            item_alias = self.node.data.config.loopList.name if self.node.data.config.loopList else ""
 
         # 2. 分离输出定义 (LoopOutputs vs LoopSubOutputs)
         # 复刻原型逻辑：检查 value.type == 'ref' && source == 'loop-block-output'
@@ -222,12 +232,13 @@ class LoopNode(BaseNode):
 
             async def _guarded(index: int, item: Any) -> Tuple[int, Dict[str, Any]]:
                 async with semaphore:
-                    result = await self._run_single_iteration(
+                    result, _ = await self._run_single_iteration(
                         loop_node_id=loop_node_id,
-                        node_input=node_input,
+                        mutable_state=dict(mutable_state),
                         loop_sub_outputs_schema=loop_sub_outputs_schema,
                         index=index,
                         item=item,
+                        item_alias=item_alias,
                     )
                     return index, result
 
@@ -237,12 +248,13 @@ class LoopNode(BaseNode):
             all_iterations_results = [result for _, result in indexed_results]
         else:
             for index, item in enumerate(loop_data):
-                iteration_data = await self._run_single_iteration(
+                iteration_data, mutable_state = await self._run_single_iteration(
                     loop_node_id=loop_node_id,
-                    node_input=node_input,
+                    mutable_state=mutable_state,
                     loop_sub_outputs_schema=loop_sub_outputs_schema,
                     index=index,
                     item=item,
+                    item_alias=item_alias,
                 )
                 all_iterations_results.append(iteration_data)
 
@@ -252,9 +264,22 @@ class LoopNode(BaseNode):
         loop_sub_result = await merge_dicts_vanilla(all_iterations_results)
         
         # 解析那些非内部引用的固定输出 (如果有)
-        loop_def_result = await schemas2obj(loop_outputs_schema, self.context.variables)
+        current_loop_state = {
+            "item": loop_data[-1] if len(loop_data) else None,
+            "index": len(loop_data) - 1 if len(loop_data) else 0,
+            **mutable_state,
+        }
+        if item_alias and item_alias not in {"index", "item"} and len(loop_data):
+            current_loop_state[item_alias] = loop_data[-1]
+        loop_def_result = await schemas2obj(
+            loop_outputs_schema,
+            {
+                **self.context.variables,
+                loop_node_id: current_loop_state,
+            },
+        )
         
         # 合并最终输出
         final_output = {**loop_sub_result, **loop_def_result}
         
-        return NodeExecutionResult(input=node_input, data=NodeResultData(output=final_output))
+        return NodeExecutionResult(input=mutable_state, data=NodeResultData(output=final_output))

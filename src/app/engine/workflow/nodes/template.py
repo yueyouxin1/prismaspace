@@ -94,7 +94,33 @@ BRANCH_TEMPLATE = NodeTemplate(
 )
 
 # ============================================================================
-# 4. Loop Node Template
+# 4. Set Variable Node Template
+# ============================================================================
+class SetVariableAssignment(BaseModel):
+    left: ParameterSchema
+    right: ParameterSchema
+
+
+class SetVariableNodeConfig(BaseNodeConfig):
+    assignments: List[SetVariableAssignment] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+
+SET_VARIABLE_TEMPLATE = NodeTemplate(
+    category=NodeCategory.LOGIC,
+    icon="refresh-cw",
+    data=NodeData(
+        registryId="SetVariable",
+        name="设置变量",
+        description="用于重置循环变量的值，使其后续循环使用重置后的值。",
+        inputs=[],
+        outputs=[],
+        config=SetVariableNodeConfig(),
+    ),
+)
+
+# ============================================================================
+# 5. Loop Node Template
 # ============================================================================
 class LoopNodeConfig(BaseNodeConfig):
     loopType: Literal["count", "list"] = Field(default="count")
@@ -119,7 +145,7 @@ LOOP_TEMPLATE = NodeTemplate(
 
 
 # ============================================================================
-# 5. Interrupt Node Template
+# 6. Interrupt Node Template
 # ============================================================================
 class InterruptNodeConfig(BaseNodeConfig):
     reason: str = Field(default="user_input_required")
