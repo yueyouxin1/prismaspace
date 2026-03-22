@@ -37,7 +37,14 @@ class OutputNode(BaseNode):
     中间输出节点。用于在工作流执行过程中输出调试信息或中间结果。
     """
     async def execute(self) -> NodeExecutionResult:
-        return NodeExecutionResult(data=NodeResultData(output={}))
+        final_params = await schemas2obj(self.node.data.inputs, self.context.variables)
+        content = None
+        if self.node.data.config.returnType == 'Text' and self.node.data.config.content:
+            content = await get_value_by_expr_template(self.node.data.config.content, final_params)
+        return NodeExecutionResult(
+            input=final_params,
+            data=NodeResultData(output=final_params, content=content),
+        )
 
 
 @register_node(template=INTERRUPT_TEMPLATE)
