@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import json
 from typing import Dict, Any, List
 from pydantic import Field, ConfigDict
@@ -45,7 +46,10 @@ class MockLLMNode(BaseNode):
         # 1. 解析配置与输入
         node_input = await schemas2obj(self.node.data.inputs, self.context.variables)
         prompt = self.node.data.config.system_prompt
-        input_query = self.node.data.config.input_query
+        input_query = node_input.get("input_query")
+        if input_query is None:
+            input_query = self.node.data.config.input_query
+        input_query = str(input_query or "")
         
         # 获取输出模式，默认为 text
         # 这里的 config 结构对应前端的配置项
@@ -60,6 +64,61 @@ class MockLLMNode(BaseNode):
             broadcaster = StreamBroadcaster(self.node.id)
 
         # 3. 定义生成逻辑 (根据模式策略)
+
+        def _mock_string_value(field_name: str, field_path: str) -> str:
+            normalized_query = input_query.removeprefix("SAFE_")
+            lower_name = field_name.lower()
+
+            if lower_name in {"product_name", "product", "name", "item"}:
+                return normalized_query
+
+            if lower_name in {"score", "rating"}:
+                checksum = sum(ord(ch) for ch in normalized_query)
+                return str(60 + (checksum % 41)) if normalized_query else "0"
+
+            return f"Parsed value for {field_path} based on '{input_query}'"
+
+        def _build_json_value(schema: ParameterSchema, field_path: str) -> Any:
+            schema_type = schema.type
+            field_name = schema.name or field_path
+
+            if schema_type == "string":
+                return _mock_string_value(field_name, field_path)
+            if schema_type == "integer":
+                checksum = sum(ord(ch) for ch in input_query)
+                return checksum % 100
+            if schema_type == "number":
+                checksum = sum(ord(ch) for ch in input_query)
+                return float(checksum % 100)
+            if schema_type == "boolean":
+                return bool(input_query)
+            if schema_type == "object":
+                result: Dict[str, Any] = {}
+                for prop in schema.properties or []:
+                    if not prop.name:
+                        continue
+                    child_path = f"{field_path}.{prop.name}" if field_path else prop.name
+                    result[prop.name] = _build_json_value(prop, child_path)
+                return result
+            if schema_type == "array":
+                return []
+            return None
+
+        def _build_markdown_content() -> str:
+            try:
+                parsed_input = ast.literal_eval(input_query)
+            except (ValueError, SyntaxError):
+                parsed_input = None
+
+            if isinstance(parsed_input, list) and all(isinstance(item, dict) for item in parsed_input):
+                lines = ["## Analysis"]
+                for item in parsed_input:
+                    product_name = item.get("product_name") or "Unknown Product"
+                    score = item.get("score") or "N/A"
+                    lines.append(f"- {product_name}: score {score}")
+                return "\n".join(lines)
+
+            return f"## Analysis\n**Echo:** {input_query[::-1]}"
         
         async def _generate_text_or_markdown() -> Dict[str, Any]:
             """文本/Markdown 模式：单字段流式"""
@@ -70,7 +129,7 @@ class MockLLMNode(BaseNode):
             
             # 模拟 Markdown 内容
             is_md = response_format == "markdown"
-            content = f"## Analysis\n**Echo:** {input_query[::-1]}" if is_md else f"Echo: {input_query[::-1]}"
+            content = _build_markdown_content() if is_md else f"Echo: {input_query[::-1]}"
             
             full_content = ""
             for char in content:
@@ -87,13 +146,17 @@ class MockLLMNode(BaseNode):
 
         async def _generate_json() -> Dict[str, Any]:
             """JSON 模式：多字段结构化流式"""
-            # 模拟 LLM 根据 input_query 生成了对应的 JSON 数据
-            # 这里我们要根据 outputs 定义的字段来生成 Mock 数据
-            final_data = {}
-            
-            # 1. 初始化结构
-            base_output = await schemas2obj(outputs_schema, self.context.variables)
-            final_data.update(base_output)
+            final_data: Dict[str, Any] = {}
+            mock_values: Dict[str, str] = {}
+
+            for schema in outputs_schema:
+                if not schema.name:
+                    continue
+                if schema.type == "string":
+                    final_data[schema.name] = ""
+                    mock_values[schema.name] = _build_json_value(schema, schema.name)
+                else:
+                    final_data[schema.name] = _build_json_value(schema, schema.name)
 
             # 2. 模拟逐个字段生成 (或者交替生成)
             # 假设我们只对 String 类型的字段进行流式模拟
@@ -102,12 +165,6 @@ class MockLLMNode(BaseNode):
             if not target_fields:
                 # 如果没有字符串字段，直接返回结果，不流式广播
                 return final_data
-
-            # 模拟数据源
-            mock_values = {
-                f.name: f"Parsed value for {f.name} based on '{input_query}'" 
-                for f in target_fields
-            }
 
             # 模拟流式过程：我们简单地轮流发送每个字段的一个字符
             # 这模拟了 LLM 在生成 JSON 字符串时的增量解析效果

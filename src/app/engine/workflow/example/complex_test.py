@@ -126,7 +126,14 @@ async def run_complex_system_test():
                                 ],
                                 "outputs": [
                                     # MockLLM 在 JSON 模式下会流式生成这个字段
-                                    {"name": "analysis_json", "type": "object"} 
+                                    {
+                                        "name": "analysis_json",
+                                        "type": "object",
+                                        "properties": [
+                                            {"name": "product_name", "type": "string"},
+                                            {"name": "score", "type": "string"}
+                                        ]
+                                    }
                                 ]
                             }
                         }
