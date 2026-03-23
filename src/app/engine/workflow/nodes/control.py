@@ -1,7 +1,7 @@
 import re
 import asyncio
-from typing import Dict, Any, AsyncGenerator, List
-from ...utils.parameter_schema_utils import schemas2obj
+from typing import Dict, Any, AsyncGenerator, List, Optional
+from ...utils.parameter_schema_utils import resolve_schema_value, schemas2obj
 from ...utils.data_parser import get_value_by_path, get_value_by_expr_template
 from ...utils.stream import StreamBroadcaster
 from ..registry import register_node, BaseNode, WorkflowRuntimeContext
@@ -98,10 +98,16 @@ class EndNode(BaseNode):
     核心职责：生成最终响应。如果配置了流式输出，需要处理流的拼接和透传。
     """
 
+    def _find_input_schema(self, top_level_name: str) -> Optional[ParameterSchema]:
+        for schema in self.node.data.inputs or []:
+            if schema.name == top_level_name:
+                return schema
+        return None
+
     async def _stream_content_handler(self, template: str) -> AsyncGenerator[str, None]:
         parts = re.split(r'(\{\{[^}]+\}\})', template)
         
-        # 缓存解析后的参数，避免重复计算
+        # 缓存解析后的顶层参数，避免重复计算
         cached_params = {}
         last_seen_version = -1
 
@@ -138,14 +144,25 @@ class EndNode(BaseNode):
                 
                 if current_version > last_seen_version:
                     # 重新解析 inputs 生成本地变量字典
-                    cached_params = await schemas2obj(
-                        self.node.data.inputs, 
-                        self.context.variables
-                    )
+                    cached_params = {}
                     last_seen_version = current_version
-                
-                # 从解析好的本地参数中直接取值
-                value = await get_value_by_path(cached_params, variable_path)
+
+                top_level_name = variable_path.split('.')[0].strip()
+                if top_level_name not in cached_params:
+                    input_schema = self._find_input_schema(top_level_name)
+                    if input_schema is None:
+                        cached_params[top_level_name] = None
+                    else:
+                        cached_params[top_level_name] = await resolve_schema_value(
+                            input_schema,
+                            self.context.variables,
+                            stream_mode="peek",
+                        )
+
+                if variable_path == top_level_name:
+                    value = cached_params.get(top_level_name)
+                else:
+                    value = await get_value_by_path(cached_params, variable_path)
                 if value is not None:
                     yield str(value)
 

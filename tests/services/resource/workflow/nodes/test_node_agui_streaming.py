@@ -1,11 +1,16 @@
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.services.resource.agent import agent_service as agent_service_module
 from app.engine.model.llm import LLMMessage, LLMResult, LLMUsage
 from app.engine.schemas.parameter_schema import ParameterSchema
+from app.engine.utils.stream import StreamBroadcaster
+from app.engine.workflow.definitions import WorkflowNode
 from app.services.common.llm_capability_provider import UsageAccumulator
-from app.services.resource.workflow.nodes.node import BaseLLMNodeProcessor, WorkflowLLMCallbacks
+from app.services.resource.workflow.nodes.node import AppLLMNode, BaseLLMNodeProcessor, WorkflowLLMCallbacks
 from app.utils.async_generator import AsyncGeneratorManager
 
 
@@ -148,3 +153,82 @@ async def test_generate_text_falls_back_to_multimodal_final_message_content():
 
     output = await processor._generate_text_or_markdown(generator, outputs_schema)
     assert output["text"] == "Hello\nWorld"
+
+
+async def test_app_llm_node_stream_broadcaster_emits_chunks_before_final_result(monkeypatch):
+    class FakeAIProvider:
+        async def resolve_model_version(self, module_uuid=None):
+            return SimpleNamespace(id=1)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def with_billing(self, **kwargs):
+            return await kwargs["execution_func"]()
+
+        async def execute_llm(self, *, callbacks, **kwargs):
+            await callbacks.on_chunk_generated("A")
+            await asyncio.sleep(0.01)
+            await callbacks.on_chunk_generated("B")
+            await asyncio.sleep(0.01)
+            return LLMResult(
+                message=LLMMessage(role="assistant", content="AB"),
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    class FakeAgentService:
+        def __init__(self, context):
+            self.ai_provider = FakeAIProvider()
+            self.module_service = SimpleNamespace(
+                get_runtime_context=AsyncMock(
+                    return_value=SimpleNamespace(version=SimpleNamespace(name="gpt-test"))
+                )
+            )
+            self.prompt_template = SimpleNamespace(render=lambda text, variables: text)
+
+    monkeypatch.setattr(agent_service_module, "AgentService", FakeAgentService)
+
+    node = WorkflowNode.model_validate(
+        {
+            "id": "llm",
+            "data": {
+                "registryId": "LLMNode",
+                "name": "LLM",
+                "inputs": [],
+                "outputs": [{"name": "text", "type": "string"}],
+                "config": {
+                    "llm_module_version_uuid": "module-1",
+                    "agent_config": {
+                        "io_config": {"response_format": {"type": "text"}},
+                    },
+                    "system_prompt": "write",
+                },
+            },
+        }
+    )
+
+    external_context = SimpleNamespace(
+        app_context=SimpleNamespace(actor=SimpleNamespace(id=1)),
+        runtime_workspace=SimpleNamespace(id=9),
+    )
+    context = SimpleNamespace(
+        variables={},
+        external_context=external_context,
+    )
+
+    executor = AppLLMNode(context, node, True)
+    result = await executor.execute()
+
+    assert isinstance(result.data, StreamBroadcaster)
+    stream = result.data.subscribe()
+
+    first_chunk = await asyncio.wait_for(anext(stream), timeout=0.2)
+    second_chunk = await asyncio.wait_for(anext(stream), timeout=0.2)
+    final_output = await asyncio.wait_for(result.data.get_result(), timeout=0.2)
+
+    assert first_chunk == {"text": "A"}
+    assert second_chunk == {"text": "B"}
+    assert final_output["text"] == "AB"

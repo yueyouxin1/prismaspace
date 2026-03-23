@@ -2,10 +2,12 @@
 
 import json
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Literal, Optional, Union
 from ..schemas.parameter_schema import ParameterSchema, SchemaBlueprint, ParameterValue
 from .stream import Streamable
 from .data_parser import get_value_by_path, get_value_by_expr_template, get_default_value_by_type, convert_value_by_type
+
+StreamMode = Literal["await", "peek", "preserve", "skip"]
 
 # ========================================================================
 # build_json_schema_node (from previous step, unchanged and correct)
@@ -55,7 +57,32 @@ def build_json_schema_node(param_schema: Union[ParameterSchema, SchemaBlueprint]
 # schema_filler (The new, powerful, universal implementation)
 # ========================================================================
 
-async def schemas2obj(target_schema: List[ParameterSchema], context: Optional[Dict[str, Any]] = None, real_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _normalize_stream_mode(stream_mode: str) -> StreamMode:
+    if stream_mode not in {"await", "peek", "preserve", "skip"}:
+        raise ValueError(f"Unsupported stream_mode: {stream_mode}")
+    return stream_mode
+
+
+async def resolve_schema_value(
+    item_schema: Union[ParameterSchema, SchemaBlueprint],
+    context: Optional[Dict[str, Any]] = None,
+    real_data_for_item: Any = None,
+    stream_mode: StreamMode = "await",
+):
+    return await _process_schema_node(
+        item_schema,
+        context or {},
+        real_data_for_item,
+        stream_mode=_normalize_stream_mode(stream_mode),
+    )
+
+
+async def schemas2obj(
+    target_schema: List[ParameterSchema],
+    context: Optional[Dict[str, Any]] = None,
+    real_data: Optional[Dict[str, Any]] = None,
+    stream_mode: StreamMode = "await",
+) -> Dict[str, Any]:
     """
     The main entry point. Creates a structured object based on the target_schema.
     It intelligently fills the structure using a combination of:
@@ -68,6 +95,7 @@ async def schemas2obj(target_schema: List[ParameterSchema], context: Optional[Di
     """
     if real_data is None: real_data = {}
     if context is None: context = {}
+    stream_mode = _normalize_stream_mode(stream_mode)
     
     result = {}
     if not isinstance(target_schema, list): return result
@@ -79,11 +107,21 @@ async def schemas2obj(target_schema: List[ParameterSchema], context: Optional[Di
 
         # Pass the corresponding part of the real_data for processing.
         current_real_data = real_data.get(item_name)
-        result[item_name] = await _process_schema_node(item_schema, context, current_real_data)
+        result[item_name] = await _process_schema_node(
+            item_schema,
+            context,
+            current_real_data,
+            stream_mode=stream_mode,
+        )
         
     return result
 
-async def _process_schema_node(item_schema: Union[ParameterSchema, SchemaBlueprint], context: Dict[str, Any], real_data_for_item: Any):
+async def _process_schema_node(
+    item_schema: Union[ParameterSchema, SchemaBlueprint],
+    context: Dict[str, Any],
+    real_data_for_item: Any,
+    stream_mode: StreamMode = "await",
+):
     """
     Recursively processes a single properties node to determine its final value.
     This is the core recursive worker.
@@ -114,8 +152,15 @@ async def _process_schema_node(item_schema: Union[ParameterSchema, SchemaBluepri
             if block_id and path and context:
                 source_data = context.get(block_id)
                 if isinstance(source_data, Streamable):
-                    source_data = await source_data.get_result()
-                if source_data and path:
+                    if stream_mode == "await":
+                        source_data = await source_data.get_result()
+                    elif stream_mode == "peek":
+                        source_data = source_data.peek_result()
+                    elif stream_mode == "skip":
+                        source_data = None
+                    elif stream_mode == "preserve":
+                        return source_data
+                if source_data is not None and path:
                     return_value = await get_value_by_path(source_data, path)
         # elif value_type == 'expr':
             # Expression evaluation logic would go here
@@ -137,7 +182,7 @@ async def _process_schema_node(item_schema: Union[ParameterSchema, SchemaBluepri
         
         # Recursively call the main function to process sub-schemas.
         # This ensures consistent filling and shaping logic at all levels.
-        return await schemas2obj(sub_schemas, context, source_obj)
+        return await schemas2obj(sub_schemas, context, source_obj, stream_mode=stream_mode)
 
     elif item_type == 'array':
         # Ensure return_value is a list; otherwise, start with an empty list.
@@ -152,14 +197,24 @@ async def _process_schema_node(item_schema: Union[ParameterSchema, SchemaBluepri
         # 这意味着我们需要“从零构建”一个包含示例项的列表。
         if not source_list:
             # 递归调用自身来构建一个默认的列表项
-            default_item = await _process_schema_node(items_blueprint, context, None)
+            default_item = await _process_schema_node(
+                items_blueprint,
+                context,
+                None,
+                stream_mode=stream_mode,
+            )
             return [default_item]
             
         # 遍历继承的列表，对每一项应用 sub_schema 进行塑形
         shaped_list = []
         for item_data in source_list:
             # 将列表中的项作为 real_data 传递给下一层递归进行处理
-            shaped_item = await _process_schema_node(items_blueprint, context, item_data)
+            shaped_item = await _process_schema_node(
+                items_blueprint,
+                context,
+                item_data,
+                stream_mode=stream_mode,
+            )
             shaped_list.append(shaped_item)
         return shaped_list
 

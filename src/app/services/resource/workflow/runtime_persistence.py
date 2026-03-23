@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from app.core.context import AppContext
 from app.db.session import SessionLocal
+from app.engine.utils.stream import Streamable
 from app.engine.workflow import (
     NodeResultData,
     NodeState,
@@ -45,6 +46,11 @@ class WorkflowRuntimePersistenceService(BaseService):
     @staticmethod
     def _jsonable(value: Any) -> Any:
         if value is None:
+            return None
+        if isinstance(value, Streamable):
+            peek_result = getattr(value, "peek_result", None)
+            if callable(peek_result):
+                return WorkflowRuntimePersistenceService._jsonable(peek_result())
             return None
         if isinstance(value, dict):
             return {key: WorkflowRuntimePersistenceService._jsonable(val) for key, val in value.items()}

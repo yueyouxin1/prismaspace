@@ -15,3 +15,9 @@ class Streamable(ABC):
     @abstractmethod
     def subscribe(self) -> AsyncGenerator[Any, None]:
         pass
+
+    def has_result(self) -> bool:
+        return False
+
+    def peek_result(self) -> Any:
+        return None

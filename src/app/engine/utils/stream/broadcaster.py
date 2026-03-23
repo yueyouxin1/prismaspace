@@ -18,12 +18,17 @@ class StreamBroadcaster(Streamable):
         self._history_lock = asyncio.Lock()
         self._sentinel = object()
         self._stopped = False
+        self._result: Any = None
+        self._has_result = False
 
     async def _task_wrapper(self, task_coro):
         """包装流式任务，确保完成后发出信号。"""
         try:
             # 执行实际的流式处理协程
-            return await task_coro
+            result = await task_coro
+            self._result = result
+            self._has_result = True
+            return result
         except Exception as e:
             print(f"[StreamBroadcaster] Error in task for {self._id}: {e}")
             await self.broadcast({"type": "error", "data": str(e)})
@@ -42,6 +47,12 @@ class StreamBroadcaster(Streamable):
 
     def get_task(self) -> Optional[asyncio.Task]:
         return self._task
+
+    def has_result(self) -> bool:
+        return self._has_result
+
+    def peek_result(self) -> Any:
+        return self._result if self._has_result else None
 
     async def get_result(self) -> Any:
         """

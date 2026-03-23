@@ -517,7 +517,9 @@ class WorkflowOrchestrator(WorkflowRuntimeContext):
                 result=NodeResultData(output=output),
                 executed_time=total_duration,
             )
-            self.context_mgr.set_variable(node_id, output)
+            current_value = self.context_mgr.variables.get(node_id)
+            if not isinstance(current_value, Streamable):
+                self.context_mgr.set_variable(node_id, output)
             await self.send("node_finish", node_state)
             await self._queue_successors(node_id)
             if self.runtime_observer:
