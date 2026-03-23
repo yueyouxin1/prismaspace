@@ -167,12 +167,8 @@ class WorkflowOrchestrator(WorkflowRuntimeContext):
             if item.name == target_name:
                 if item.value and item.value.type == "ref":
                     content = item.value.content
-                    if isinstance(content, dict):
-                        return {
-                            "blockID": str(content.get("blockID", "")),
-                            "path": str(content.get("path", "")),
-                            "source": str(content.get("source", "")),
-                        }
+                    if content:
+                        return content
                 return None
 
             if item.properties:
@@ -197,8 +193,8 @@ class WorkflowOrchestrator(WorkflowRuntimeContext):
             vars_in_template = re.findall(r"\{\{([^}]+)\}\}", content_template)
             for var_path in vars_in_template:
                 ref = self.get_ref_details(node.id, var_path.strip())
-                if ref and ref.get("blockID"):
-                    producers.add(ref["blockID"])
+                if ref and ref.blockID:
+                    producers.add(ref.blockID)
         return producers
 
     def _snapshot(self) -> WorkflowRuntimeSnapshot:

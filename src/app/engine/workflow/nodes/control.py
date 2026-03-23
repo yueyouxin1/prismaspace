@@ -115,7 +115,7 @@ class EndNode(BaseNode):
 
             variable_path = match.group(1).strip()
             ref_details = self.context.get_ref_details(self.node.id, variable_path)
-            block_id = ref_details.get('blockID') if ref_details else None
+            block_id = getattr(ref_details, "blockID", "") if ref_details else None
 
             source_data = None
             if block_id:
@@ -123,7 +123,7 @@ class EndNode(BaseNode):
 
             # [Case 1] 源是流广播器 -> 走流式快速通道
             if isinstance(source_data, StreamBroadcaster):
-                path_in_chunk = ref_details.get('path', '')
+                path_in_chunk = getattr(ref_details, "path", "")
                 stream_generator = source_data.subscribe()
                 async for chunk in stream_generator:
                     value = chunk if isinstance(chunk, str) else await get_value_by_path(chunk, path_in_chunk)
