@@ -27,12 +27,29 @@ class WorkflowEventLogService(BaseService):
         payload: Dict[str, Any],
         sequence_no: Optional[int] = None,
     ) -> WorkflowExecutionEvent:
+        return await self.append_event_for_ids(
+            execution_id=execution.id,
+            workflow_instance_id=workflow_instance.id,
+            event_type=event_type,
+            payload=payload,
+            sequence_no=sequence_no,
+        )
+
+    async def append_event_for_ids(
+        self,
+        *,
+        execution_id: int,
+        workflow_instance_id: int,
+        event_type: str,
+        payload: Dict[str, Any],
+        sequence_no: Optional[int] = None,
+    ) -> WorkflowExecutionEvent:
         if sequence_no is None:
-            last_event = await self.dao.get_last_event(resource_execution_id=execution.id)
+            last_event = await self.dao.get_last_event(resource_execution_id=execution_id)
             sequence_no = 1 if last_event is None else last_event.sequence_no + 1
         event = WorkflowExecutionEvent(
-            resource_execution_id=execution.id,
-            workflow_instance_id=workflow_instance.id,
+            resource_execution_id=execution_id,
+            workflow_instance_id=workflow_instance_id,
             sequence_no=sequence_no,
             event_type=event_type,
             payload=payload,

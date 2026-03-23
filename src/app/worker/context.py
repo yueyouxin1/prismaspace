@@ -46,6 +46,7 @@ async def rebuild_context_for_worker(ctx: dict, db_session: AsyncSession, user_u
     # 注意：返回的 AppContext 包含了一个活动的、由 `async with` 管理的 db_session
     return AppContext(
         db=db_session,
+        db_session_factory=ctx.get("db_session_factory"),
         auth=auth_context,
         redis_service=redis_service,
         vector_manager=vector_manager,

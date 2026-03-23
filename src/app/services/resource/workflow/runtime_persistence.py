@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from app.core.context import AppContext
+from app.db.session import SessionLocal
 from app.engine.workflow import (
     NodeResultData,
     NodeState,
@@ -60,22 +61,22 @@ class WorkflowRuntimePersistenceService(BaseService):
     async def upsert_node_execution(
         self,
         *,
-        execution: ResourceExecution,
-        workflow_instance: Workflow,
+        execution_id: int,
+        workflow_instance_id: int,
         node: WorkflowRuntimeNodeSpec,
         state: NodeState,
         reason: str,
         attempt: int = 1,
     ) -> WorkflowNodeExecution:
         record = await self.node_execution_dao.get_by_execution_node_attempt(
-            resource_execution_id=execution.id,
+            resource_execution_id=execution_id,
             node_id=node.id,
             attempt=attempt,
         )
         if record is None:
             record = WorkflowNodeExecution(
-                resource_execution_id=execution.id,
-                workflow_instance_id=workflow_instance.id,
+                resource_execution_id=execution_id,
+                workflow_instance_id=workflow_instance_id,
                 node_id=node.id,
                 node_name=node.name,
                 node_type=node.registry_id,
@@ -107,16 +108,16 @@ class WorkflowRuntimePersistenceService(BaseService):
     async def create_checkpoint(
         self,
         *,
-        execution: ResourceExecution,
-        workflow_instance: Workflow,
+        execution_id: int,
+        workflow_instance_id: int,
         runtime_plan: WorkflowRuntimePlan,
         snapshot: WorkflowRuntimeSnapshot,
         reason: WorkflowCheckpointReason,
         node_id: Optional[str] = None,
     ) -> WorkflowExecutionCheckpoint:
         checkpoint = WorkflowExecutionCheckpoint(
-            resource_execution_id=execution.id,
-            workflow_instance_id=workflow_instance.id,
+            resource_execution_id=execution_id,
+            workflow_instance_id=workflow_instance_id,
             step_index=snapshot.step_index,
             reason=reason,
             node_id=node_id,
@@ -281,28 +282,39 @@ class WorkflowDurableRuntimeObserver:
         event_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.context = context
-        self.execution = execution
-        self.workflow_instance = workflow_instance
+        self.execution_id = execution.id
+        self.execution_run_id = execution.run_id
+        self.execution_thread_id = execution.thread_id
+        self.workflow_instance_id = workflow_instance.id
         self.runtime_plan = runtime_plan
-        self.persistence = WorkflowRuntimePersistenceService(context)
         self.event_callback = event_callback
+        self.db_session_factory = context.db_session_factory or SessionLocal
 
     @staticmethod
     def cancel_signal_key(run_id: str) -> str:
         return f"workflow:run:{run_id}:cancel"
 
+    def _build_child_context(self, db_session) -> AppContext:
+        return self.context.model_copy(update={"db": db_session, "db_session_factory": self.db_session_factory})
+
+    async def _run_in_persistence_session(self, operation: Callable[[WorkflowRuntimePersistenceService], Awaitable[Any]]) -> Any:
+        async with self.db_session_factory() as db_session:
+            async with db_session.begin():
+                persistence = WorkflowRuntimePersistenceService(self._build_child_context(db_session))
+                return await operation(persistence)
+
     async def request_cancel(self) -> None:
         await self.context.redis_service.set_json(
-            self.cancel_signal_key(self.execution.run_id),
-            {"requested_at": self.persistence._utcnow().isoformat()},
+            self.cancel_signal_key(self.execution_run_id),
+            {"requested_at": WorkflowRuntimePersistenceService._utcnow().isoformat()},
             expire=self.CANCEL_SIGNAL_TTL,
         )
 
     async def clear_cancel_signal(self) -> None:
-        await self.context.redis_service.delete_key(self.cancel_signal_key(self.execution.run_id))
+        await self.context.redis_service.delete_key(self.cancel_signal_key(self.execution_run_id))
 
     async def should_cancel(self) -> bool:
-        payload = await self.context.redis_service.get_json(self.cancel_signal_key(self.execution.run_id))
+        payload = await self.context.redis_service.get_json(self.cancel_signal_key(self.execution_run_id))
         return payload is not None
 
     async def on_execution_start(
@@ -310,15 +322,17 @@ class WorkflowDurableRuntimeObserver:
         workflow_plan: WorkflowRuntimePlan,
         snapshot: WorkflowRuntimeSnapshot,
     ) -> None:
-        checkpoint = await self.persistence.create_checkpoint(
-            execution=self.execution,
-            workflow_instance=self.workflow_instance,
-            runtime_plan=workflow_plan,
-            snapshot=snapshot,
-            reason=WorkflowCheckpointReason.EXECUTION_START,
-        )
+        async def _persist(persistence: WorkflowRuntimePersistenceService) -> WorkflowExecutionCheckpoint:
+            return await persistence.create_checkpoint(
+                execution_id=self.execution_id,
+                workflow_instance_id=self.workflow_instance_id,
+                runtime_plan=workflow_plan,
+                snapshot=snapshot,
+                reason=WorkflowCheckpointReason.EXECUTION_START,
+            )
+
+        checkpoint = await self._run_in_persistence_session(_persist)
         await self._emit_checkpoint_created(checkpoint)
-        await self.context.db.commit()
 
     async def on_execution_end(
         self,
@@ -332,16 +346,19 @@ class WorkflowDurableRuntimeObserver:
             "interrupted": WorkflowCheckpointReason.EXECUTION_INTERRUPTED,
             "cancelled": WorkflowCheckpointReason.EXECUTION_CANCELLED,
         }.get(status, WorkflowCheckpointReason.EXECUTION_FAILED)
-        checkpoint = await self.persistence.create_checkpoint(
-            execution=self.execution,
-            workflow_instance=self.workflow_instance,
-            runtime_plan=self.runtime_plan,
-            snapshot=snapshot,
-            reason=reason,
-        )
+
+        async def _persist(persistence: WorkflowRuntimePersistenceService) -> WorkflowExecutionCheckpoint:
+            return await persistence.create_checkpoint(
+                execution_id=self.execution_id,
+                workflow_instance_id=self.workflow_instance_id,
+                runtime_plan=self.runtime_plan,
+                snapshot=snapshot,
+                reason=reason,
+            )
+
+        checkpoint = await self._run_in_persistence_session(_persist)
         await self._emit_checkpoint_created(checkpoint)
         await self.clear_cancel_signal()
-        await self.context.db.commit()
 
     async def on_node_state(
         self,
@@ -350,31 +367,35 @@ class WorkflowDurableRuntimeObserver:
         reason: str,
         snapshot: Optional[WorkflowRuntimeSnapshot] = None,
     ) -> None:
-        await self.persistence.upsert_node_execution(
-            execution=self.execution,
-            workflow_instance=self.workflow_instance,
-            node=node,
-            state=state,
-            reason=reason,
-        )
-
         checkpoint_reason = {
             "node_completed": WorkflowCheckpointReason.NODE_COMPLETED,
             "node_failed": WorkflowCheckpointReason.NODE_FAILED,
             "node_interrupted": WorkflowCheckpointReason.NODE_INTERRUPTED,
             "node_skipped": WorkflowCheckpointReason.NODE_SKIPPED,
         }.get(reason)
-        if checkpoint_reason is not None and snapshot is not None:
-            checkpoint = await self.persistence.create_checkpoint(
-                execution=self.execution,
-                workflow_instance=self.workflow_instance,
+
+        async def _persist(persistence: WorkflowRuntimePersistenceService) -> Optional[WorkflowExecutionCheckpoint]:
+            await persistence.upsert_node_execution(
+                execution_id=self.execution_id,
+                workflow_instance_id=self.workflow_instance_id,
+                node=node,
+                state=state,
+                reason=reason,
+            )
+            if checkpoint_reason is None or snapshot is None:
+                return None
+            return await persistence.create_checkpoint(
+                execution_id=self.execution_id,
+                workflow_instance_id=self.workflow_instance_id,
                 runtime_plan=self.runtime_plan,
                 snapshot=snapshot,
                 reason=checkpoint_reason,
                 node_id=node.id,
             )
+
+        checkpoint = await self._run_in_persistence_session(_persist)
+        if checkpoint is not None:
             await self._emit_checkpoint_created(checkpoint)
-            await self.context.db.commit()
 
     async def _emit_checkpoint_created(self, checkpoint: WorkflowExecutionCheckpoint) -> None:
         if self.event_callback is None:
@@ -401,8 +422,8 @@ class WorkflowDurableRuntimeObserver:
                 "reason": checkpoint.reason.value if hasattr(checkpoint.reason, "value") else str(checkpoint.reason),
                 "nodeId": checkpoint.node_id,
                 "stepIndex": checkpoint.step_index,
-                "run_id": self.execution.run_id,
-                "thread_id": self.execution.thread_id,
+                "run_id": self.execution_run_id,
+                "thread_id": self.execution_thread_id,
                 **node_payload,
             },
         )

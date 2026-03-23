@@ -285,31 +285,42 @@ class WorkflowRunExecutionService:
         service = self.workflow_service
         next_sequence: Optional[int] = None
         sequence_lock = asyncio.Lock()
+        execution_id = execution.id
+        workflow_instance_id = workflow_instance.id
+        execution_run_id = execution.run_id
+        db_session_factory = service._db_session_factory
 
         async def _persist(event_type: str, payload: Dict[str, Any]) -> None:
             try:
                 nonlocal next_sequence
                 async with sequence_lock:
-                    if next_sequence is None:
-                        next_sequence = await service.event_log_service.get_last_sequence(
-                            execution_id=execution.id,
-                        ) + 1
-                    current_sequence = next_sequence
+                    current_sequence: Optional[int] = None
+                    async with db_session_factory() as event_db:
+                        async with event_db.begin():
+                            event_context = service.context.model_copy(
+                                update={"db": event_db, "db_session_factory": db_session_factory}
+                            )
+                            event_log_service = service.event_log_service.__class__(event_context)
+                            if next_sequence is None:
+                                next_sequence = await event_log_service.get_last_sequence(
+                                    execution_id=execution_id,
+                                ) + 1
+                            current_sequence = next_sequence
 
-                    await service.event_log_service.append_event(
-                        execution=execution,
-                        workflow_instance=workflow_instance,
-                        event_type=event_type,
-                        payload=payload,
-                        sequence_no=current_sequence,
-                    )
-                    await service.db.commit()
-                    next_sequence = current_sequence + 1
+                            await event_log_service.append_event_for_ids(
+                                execution_id=execution_id,
+                                workflow_instance_id=workflow_instance_id,
+                                event_type=event_type,
+                                payload=payload,
+                                sequence_no=current_sequence,
+                            )
+                    if current_sequence is not None:
+                        next_sequence = current_sequence + 1
             except Exception:
                 logger.exception(
                     "Failed to persist workflow event %s for run %s",
                     event_type,
-                    execution.run_id,
+                    execution_run_id,
                 )
 
         return _persist
