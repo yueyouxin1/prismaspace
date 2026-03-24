@@ -58,6 +58,45 @@ class WorkflowEventLogService(BaseService):
         await self.db.flush()
         return event
 
+    async def append_events(
+        self,
+        *,
+        execution: ResourceExecution,
+        workflow_instance: Workflow,
+        events: List[Dict[str, Any]],
+    ) -> None:
+        await self.append_events_for_ids(
+            execution_id=execution.id,
+            workflow_instance_id=workflow_instance.id,
+            events=events,
+        )
+
+    async def append_events_for_ids(
+        self,
+        *,
+        execution_id: int,
+        workflow_instance_id: int,
+        events: List[Dict[str, Any]],
+    ) -> None:
+        if not events:
+            return
+
+        last_event = await self.dao.get_last_event(resource_execution_id=execution_id)
+        sequence = 1 if last_event is None else last_event.sequence_no + 1
+
+        for item in events:
+            event = WorkflowExecutionEvent(
+                resource_execution_id=execution_id,
+                workflow_instance_id=workflow_instance_id,
+                sequence_no=sequence,
+                event_type=str(item["event_type"]),
+                payload=item["payload"],
+            )
+            self.db.add(event)
+            sequence += 1
+
+        await self.db.flush()
+
     async def get_last_sequence(
         self,
         *,

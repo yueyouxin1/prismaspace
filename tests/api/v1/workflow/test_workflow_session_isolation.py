@@ -3,8 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.context import AppContext
-from app.services.resource.workflow.event_log_service import WorkflowEventLogService
-from app.services.resource.workflow.run_execution import WorkflowRunExecutionService
 from app.services.resource.workflow.runtime_persistence import (
     WorkflowDurableRuntimeObserver,
     WorkflowRuntimePersistenceService,
@@ -67,43 +65,3 @@ async def test_runtime_observer_uses_isolated_session_for_node_persistence(monke
     )
 
     assert seen_dbs == ["isolated-db"]
-
-
-@pytest.mark.asyncio
-async def test_event_persister_uses_isolated_session(monkeypatch):
-    original_db = SimpleNamespace(label="original-db")
-    isolated_db = _FakeSession("isolated-db")
-    seen_dbs: list[str] = []
-
-    async def _fake_get_last_sequence(self, *, execution_id: int) -> int:
-        seen_dbs.append(f"read:{self.db.label}")
-        return 0
-
-    async def _fake_append_event_for_ids(self, **kwargs):
-        seen_dbs.append(f"write:{self.db.label}")
-        return SimpleNamespace(id=1)
-
-    monkeypatch.setattr(WorkflowEventLogService, "get_last_sequence", _fake_get_last_sequence)
-    monkeypatch.setattr(WorkflowEventLogService, "append_event_for_ids", _fake_append_event_for_ids)
-
-    context = AppContext.model_construct(
-        db=original_db,
-        db_session_factory=lambda: isolated_db,
-        auth=None,
-        redis_service=SimpleNamespace(),
-        vector_manager=SimpleNamespace(),
-        arq_pool=SimpleNamespace(),
-    )
-    workflow_service = SimpleNamespace(
-        _db_session_factory=lambda: isolated_db,
-        context=context,
-        event_log_service=WorkflowEventLogService(context),
-    )
-    persister = WorkflowRunExecutionService(workflow_service).build_event_persister(
-        execution=SimpleNamespace(id=33, run_id="run-33"),
-        workflow_instance=SimpleNamespace(id=44),
-    )
-
-    await persister("node.started", {"ok": True})
-
-    assert seen_dbs == ["read:isolated-db", "write:isolated-db"]

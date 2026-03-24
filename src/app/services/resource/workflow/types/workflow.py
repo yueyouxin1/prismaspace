@@ -12,7 +12,7 @@ from app.utils.async_generator import AsyncGeneratorManager
 if TYPE_CHECKING:
     from app.engine.workflow import WorkflowRuntimePlan, WorkflowRuntimeSnapshot
     from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer
-    from app.services.resource.workflow.run_execution import WorkflowStreamCallbacks
+    from app.services.resource.workflow.persisting_callbacks import PersistingWorkflowCallbacks
 
 
 @dataclass
@@ -32,7 +32,7 @@ class WorkflowBackgroundTaskKwargs(TypedDict):
     runtime_plan: "WorkflowRuntimePlan"
     restored_snapshot: Optional["WorkflowRuntimeSnapshot"]
     payload: dict[str, Any]
-    callbacks: "WorkflowStreamCallbacks"
+    callbacks: "PersistingWorkflowCallbacks"
     generator_manager: AsyncGeneratorManager
     external_context: "ExternalContext"
     trace_id: str

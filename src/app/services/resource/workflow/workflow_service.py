@@ -36,10 +36,11 @@ from app.services.resource.execution.execution_ledger_service import ExecutionLe
 from app.services.resource.resource_ref_service import ResourceRefService
 from app.services.exceptions import ServiceException, NotFoundError
 from app.services.resource.workflow.protocol_adapter.registry import build_default_workflow_protocol_registry
-from app.services.resource.workflow.event_log_service import WorkflowEventLogService
 from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer, WorkflowLiveEventService
+from app.services.resource.workflow.persisting_callbacks import PersistingWorkflowCallbacks
 from app.services.resource.workflow.run_control import WorkflowRunControlService
-from app.services.resource.workflow.run_execution import WorkflowRunExecutionService, WorkflowStreamCallbacks
+from app.services.resource.workflow.run_execution import WorkflowRunExecutionService
+from app.services.resource.workflow.run_persistence import WorkflowRunPersistenceService
 from app.services.resource.workflow.run_preparation import WorkflowRunPreparationService
 from app.services.resource.workflow.run_query import WorkflowRunQueryService
 from app.services.resource.workflow.runtime_persistence import WorkflowRuntimePersistenceService
@@ -74,7 +75,7 @@ class WorkflowService(ResourceImplementationService):
         self.engine_service = WorkflowEngineService()
         self.execution_ledger_service = ExecutionLedgerService(context)
         self.runtime_persistence = WorkflowRuntimePersistenceService(context)
-        self.event_log_service = WorkflowEventLogService(context)
+        self.run_persistence_service = WorkflowRunPersistenceService(context)
         self.live_event_service = WorkflowLiveEventService(context)
         self.protocol_adapters = build_default_workflow_protocol_registry()
         self.runtime_compiler = WorkflowRuntimeCompiler()
@@ -83,6 +84,36 @@ class WorkflowService(ResourceImplementationService):
         self.run_execution_service = WorkflowRunExecutionService(self)
         self.run_preparation_service = WorkflowRunPreparationService(self)
         self._db_session_factory = context.db_session_factory or SessionLocal
+
+    async def _persist_workflow_run_events(
+        self,
+        *,
+        execution: ResourceExecution,
+        workflow_instance: Workflow,
+        callbacks: Optional[PersistingWorkflowCallbacks],
+    ) -> None:
+        if callbacks is None:
+            return
+
+        events = callbacks.get_captured_events()
+        if not events:
+            return
+
+        try:
+            await self.run_persistence_service.append_events(
+                execution=execution,
+                workflow_instance=workflow_instance,
+                events=events,
+            )
+            await self.db.commit()
+        except Exception as exc:
+            logger.error(
+                "Failed to persist workflow run events for run %s: %s",
+                execution.run_id,
+                exc,
+                exc_info=True,
+            )
+            await self.db.rollback()
 
     # ==========================================================================
     # 2. CRUD & Lifecycle
@@ -902,7 +933,7 @@ class WorkflowService(ResourceImplementationService):
         runtime_plan: WorkflowRuntimePlan,
         restored_snapshot: Optional[WorkflowRuntimeSnapshot],
         payload: Dict[str, Any],
-        callbacks: WorkflowStreamCallbacks,
+        callbacks: PersistingWorkflowCallbacks,
         generator_manager: AsyncGeneratorManager,
         external_context: ExternalContext,
         trace_id: str,
@@ -955,12 +986,6 @@ class WorkflowService(ResourceImplementationService):
             actor=actor,
             runtime_workspace=runtime_workspace,
             existing_run_id=existing_run_id,
-        )
-
-    def _build_event_persister(self, *, execution, workflow_instance: Workflow):
-        return self.run_execution_service.build_event_persister(
-            execution=execution,
-            workflow_instance=workflow_instance,
         )
 
     def _to_run_summary(self, execution, latest_checkpoint) -> WorkflowRunSummaryRead:

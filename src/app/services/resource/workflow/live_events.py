@@ -47,9 +47,6 @@ class WorkflowLiveEventBuffer:
         if self._closed:
             self._flush_queue.put_nowait(None)
 
-    async def mark_terminal(self) -> None:
-        await self.service.mark_terminal(self.run_id, last_seq=self._next_seq - 1)
-
     async def aclose(self) -> None:
         self._closed = True
         if not self._detached:
@@ -111,20 +108,6 @@ class WorkflowLiveEventService(BaseService):
     @classmethod
     def _is_terminal(cls, payload: Dict[str, Any]) -> bool:
         return str(payload.get("event", "")) in cls.TERMINAL_EVENTS
-
-    async def mark_terminal(self, run_id: str, *, last_seq: int) -> None:
-        ttl_seconds = int(self.TERMINAL_TTL.total_seconds())
-        await self.redis.set_json(
-            self.meta_key(run_id),
-            {"terminal": True, "last_seq": int(last_seq)},
-            expire=ttl_seconds,
-        )
-        await self.redis.client.set(
-            self.seq_key(run_id),
-            str(int(last_seq)),
-            ex=ttl_seconds,
-        )
-        await self.redis.client.expire(self.events_key(run_id), ttl_seconds)
 
     async def append_event_batch(self, run_id: str, envelopes: List[Dict[str, Any]]) -> None:
         if not envelopes:

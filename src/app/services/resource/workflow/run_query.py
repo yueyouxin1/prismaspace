@@ -51,12 +51,12 @@ class WorkflowRunQueryService:
         execution_id: int,
     ) -> Optional[WorkflowInterruptRead]:
         service = self.workflow_service
-        latest_interrupt = await service.event_log_service.get_latest_event(
+        latest_interrupt = await service.run_persistence_service.get_latest_event(
             execution_id=execution_id,
             event_type="run.interrupted",
         )
         if latest_interrupt is None:
-            latest_interrupt = await service.event_log_service.get_latest_event(
+            latest_interrupt = await service.run_persistence_service.get_latest_event(
                 execution_id=execution_id,
                 event_type="interrupt",
             )
@@ -170,7 +170,7 @@ class WorkflowRunQueryService:
             raise NotFoundError("Workflow instance not found.")
         await service._check_execute_perm(workflow_instance)
 
-        return await service.event_log_service.list_events(
+        return await service.run_persistence_service.list_events(
             execution_id=execution.id,
             limit=limit,
         )
@@ -206,7 +206,7 @@ class WorkflowRunQueryService:
                 seen_terminal_event = True
             yield envelope
 
-        for event in await service.event_log_service.list_events_after_sequence(
+        for event in await service.run_persistence_service.list_events_after_sequence(
             execution_id=execution.id,
             after_sequence_no=current_seq,
             limit=1000,
@@ -225,7 +225,7 @@ class WorkflowRunQueryService:
             for _ in range(50):
                 await service.db.refresh(execution)
 
-                for event in await service.event_log_service.list_events_after_sequence(
+                for event in await service.run_persistence_service.list_events_after_sequence(
                     execution_id=execution.id,
                     after_sequence_no=current_seq,
                     limit=1000,
@@ -251,7 +251,7 @@ class WorkflowRunQueryService:
                     ResourceExecutionStatus.FAILED: "run.failed",
                 }.get(execution.status)
                 if terminal_event_type is not None:
-                    terminal_event = await service.event_log_service.get_latest_event(
+                    terminal_event = await service.run_persistence_service.get_latest_event(
                         execution_id=execution.id,
                         event_type=terminal_event_type,
                     )

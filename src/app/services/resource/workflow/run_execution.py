@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 from app.core.trace_manager import TraceManager
 from app.models import ResourceExecution, ResourceExecutionStatus, User, Workflow, Workspace
 from app.schemas.resource.workflow.workflow_schemas import (
-    WorkflowEvent,
     WorkflowExecutionRequest,
     WorkflowExecutionResponse,
     WorkflowExecutionResponseData,
@@ -18,14 +17,12 @@ from app.services.auditing.types.attributes import WorkflowAttributes
 from app.services.exceptions import ServiceException
 from app.services.resource.workflow.interceptors import WorkflowTraceInterceptor
 from app.services.resource.workflow.live_events import WorkflowLiveEventBuffer
+from app.services.resource.workflow.persisting_callbacks import PersistingWorkflowCallbacks
 from app.services.resource.workflow.runtime_persistence import WorkflowDurableRuntimeObserver
 from app.services.resource.workflow.runtime_registry import WorkflowTaskRegistry
 from app.services.resource.workflow.types.workflow import ExternalContext, PreparedWorkflowRun, WorkflowRunResult
 from app.engine.workflow import (
     NodeResultData,
-    NodeState,
-    StreamEvent,
-    WorkflowCallbacks,
     WorkflowInterruptSignal,
     WorkflowRuntimePlan,
     WorkflowRuntimeSnapshot,
@@ -34,120 +31,6 @@ from app.utils.async_generator import AsyncGeneratorManager
 
 
 logger = logging.getLogger(__name__)
-
-
-class WorkflowStreamCallbacks(WorkflowCallbacks):
-    """
-    将 workflow 引擎生命周期事件转换为统一的异步队列事件。
-    """
-
-    def __init__(
-        self,
-        *,
-        generator_manager: AsyncGeneratorManager,
-        trace_id: str,
-        run_id: str,
-        thread_id: str,
-        event_persister=None,
-    ):
-        self.generator_manager = generator_manager
-        self.trace_id = trace_id
-        self.run_id = run_id
-        self.thread_id = thread_id
-        self.event_persister = event_persister
-        self.live_event_buffer = None
-        self._node_meta: Dict[str, Dict[str, str]] = {}
-
-    def bind_live_event_buffer(self, live_event_buffer) -> None:
-        self.live_event_buffer = live_event_buffer
-
-    def _bind_runtime_plan(self, workflow_plan: WorkflowRuntimePlan) -> None:
-        self._node_meta = {
-            node.id: {
-                "id": node.id,
-                "registryId": node.registry_id,
-                "name": node.name,
-            }
-            for node in workflow_plan.all_nodes
-        }
-
-    def _enrich_with_node(self, payload: Dict[str, Any], node_id: Optional[str]) -> Dict[str, Any]:
-        if not node_id:
-            return payload
-        node_meta = self._node_meta.get(node_id)
-        if not node_meta:
-            return payload
-        enriched = dict(payload)
-        enriched.setdefault("node", node_meta)
-        return enriched
-
-    async def _safe_put(self, event: WorkflowEvent):
-        try:
-            if self.live_event_buffer is not None:
-                envelope = await self.live_event_buffer.publish(
-                    {
-                        "event": event.event,
-                        "data": event.data,
-                    }
-                )
-                event.id = str(envelope["seq"])
-            if self.event_persister is not None:
-                await self.event_persister(event.event, event.data)
-            self.generator_manager.put_nowait(event)
-        except Exception as exc:
-            logger.error("Failed to put workflow event to queue: %s", exc)
-
-    async def on_execution_start(self, workflow_def: WorkflowRuntimePlan) -> None:
-        self._bind_runtime_plan(workflow_def)
-        await self._safe_put(
-            WorkflowEvent(
-                event="run.started",
-                data={
-                    "trace_id": self.trace_id,
-                    "run_id": self.run_id,
-                    "thread_id": self.thread_id,
-                },
-            )
-        )
-
-    async def on_node_start(self, state: NodeState) -> None:
-        payload = self._enrich_with_node(state.model_dump(), state.node_id)
-        await self._safe_put(WorkflowEvent(event="node.started", data=payload))
-
-    async def on_node_finish(self, state: NodeState) -> None:
-        payload = self._enrich_with_node(state.model_dump(), state.node_id)
-        await self._safe_put(WorkflowEvent(event="node.completed", data=payload))
-
-    async def on_node_error(self, state: NodeState) -> None:
-        payload = self._enrich_with_node(state.model_dump(), state.node_id)
-        await self._safe_put(WorkflowEvent(event="node.failed", data=payload))
-
-    async def on_node_skipped(self, state: NodeState) -> None:
-        payload = self._enrich_with_node(state.model_dump(), state.node_id)
-        await self._safe_put(WorkflowEvent(event="node.skipped", data=payload))
-
-    async def on_stream_start(self, event: StreamEvent) -> None:
-        payload = self._enrich_with_node(event.model_dump(), event.node_id)
-        await self._safe_put(WorkflowEvent(event="stream.started", data=payload))
-
-    async def on_stream_chunk(self, event: StreamEvent) -> None:
-        payload = self._enrich_with_node(event.model_dump(), event.node_id)
-        await self._safe_put(WorkflowEvent(event="stream.delta", data=payload))
-
-    async def on_stream_end(self, event: StreamEvent) -> None:
-        payload = self._enrich_with_node(event.model_dump(), event.node_id)
-        await self._safe_put(WorkflowEvent(event="stream.finished", data=payload))
-
-    async def on_execution_end(self, result: NodeResultData) -> None:
-        payload = result.model_dump(mode="json")
-        payload.update({"run_id": self.run_id, "thread_id": self.thread_id})
-        await self._safe_put(WorkflowEvent(event="run.finished", data=payload))
-
-    async def on_event(self, type: str, data: Any) -> None:
-        payload = data if isinstance(data, dict) else {"detail": data}
-        payload.setdefault("run_id", self.run_id)
-        payload.setdefault("thread_id", self.thread_id)
-        await self._safe_put(WorkflowEvent(event=type, data=payload))
 
 
 class WorkflowRunExecutionService:
@@ -281,69 +164,21 @@ class WorkflowRunExecutionService:
 
         return service.run_query_service.build_run_summary(prepared["execution"], latest_checkpoint=None)
 
-    def build_event_persister(self, *, execution, workflow_instance: Workflow):
-        service = self.workflow_service
-        next_sequence: Optional[int] = None
-        sequence_lock = asyncio.Lock()
-        execution_id = execution.id
-        workflow_instance_id = workflow_instance.id
-        execution_run_id = execution.run_id
-        db_session_factory = service._db_session_factory
-
-        async def _persist(event_type: str, payload: Dict[str, Any]) -> None:
-            try:
-                nonlocal next_sequence
-                async with sequence_lock:
-                    current_sequence: Optional[int] = None
-                    async with db_session_factory() as event_db:
-                        async with event_db.begin():
-                            event_context = service.context.model_copy(
-                                update={"db": event_db, "db_session_factory": db_session_factory}
-                            )
-                            event_log_service = service.event_log_service.__class__(event_context)
-                            if next_sequence is None:
-                                next_sequence = await event_log_service.get_last_sequence(
-                                    execution_id=execution_id,
-                                ) + 1
-                            current_sequence = next_sequence
-
-                            await event_log_service.append_event_for_ids(
-                                execution_id=execution_id,
-                                workflow_instance_id=workflow_instance_id,
-                                event_type=event_type,
-                                payload=payload,
-                                sequence_no=current_sequence,
-                            )
-                    if current_sequence is not None:
-                        next_sequence = current_sequence + 1
-            except Exception:
-                logger.exception(
-                    "Failed to persist workflow event %s for run %s",
-                    event_type,
-                    execution_run_id,
-                )
-
-        return _persist
-
     def _build_callbacks(
         self,
         *,
         prepared: Dict[str, Any],
         generator_manager: AsyncGeneratorManager,
-    ) -> tuple[WorkflowStreamCallbacks, Any]:
+    ) -> tuple[PersistingWorkflowCallbacks, Any]:
         service = self.workflow_service
-        callbacks = WorkflowStreamCallbacks(
+        live_event_buffer = service.live_event_service.create_buffer(prepared["execution"].run_id)
+        callbacks = PersistingWorkflowCallbacks(
             generator_manager=generator_manager,
             trace_id=prepared["trace_id"],
             run_id=prepared["execution"].run_id,
             thread_id=prepared["execution"].thread_id,
-            event_persister=self.build_event_persister(
-                execution=prepared["execution"],
-                workflow_instance=prepared["workflow_instance"],
-            ),
+            event_sink=live_event_buffer.publish,
         )
-        live_event_buffer = service.live_event_service.create_buffer(prepared["execution"].run_id)
-        callbacks.bind_live_event_buffer(live_event_buffer)
         return callbacks, live_event_buffer
 
     async def prepare_async_run(
@@ -412,7 +247,7 @@ class WorkflowRunExecutionService:
         runtime_plan: WorkflowRuntimePlan,
         restored_snapshot: Optional[WorkflowRuntimeSnapshot],
         payload: Dict[str, Any],
-        callbacks: WorkflowStreamCallbacks,
+        callbacks: PersistingWorkflowCallbacks,
         generator_manager: AsyncGeneratorManager,
         external_context: ExternalContext,
         trace_id: str,
@@ -461,6 +296,11 @@ class WorkflowRunExecutionService:
                 status=ResourceExecutionStatus.SUCCEEDED,
             )
             await service.db.commit()
+            await service._persist_workflow_run_events(
+                execution=execution,
+                workflow_instance=workflow_instance,
+                callbacks=callbacks,
+            )
         except WorkflowInterruptSignal as interrupt_exc:
             interrupt_payload = interrupt_exc.interrupt.model_dump(mode="json")
             await callbacks.on_event(
@@ -477,6 +317,11 @@ class WorkflowRunExecutionService:
                 status=ResourceExecutionStatus.INTERRUPTED,
             )
             await service.db.commit()
+            await service._persist_workflow_run_events(
+                execution=execution,
+                workflow_instance=workflow_instance,
+                callbacks=callbacks,
+            )
         except asyncio.CancelledError:
             logger.info("Workflow %s execution cancelled.", workflow_instance.uuid)
             await runtime_observer.request_cancel()
@@ -496,6 +341,11 @@ class WorkflowRunExecutionService:
                     "thread_id": execution.thread_id,
                 },
             )
+            await service._persist_workflow_run_events(
+                execution=execution,
+                workflow_instance=workflow_instance,
+                callbacks=callbacks,
+            )
             raise
         except Exception as exc:
             logger.error("Workflow execution error: %s", exc, exc_info=True)
@@ -513,6 +363,11 @@ class WorkflowRunExecutionService:
                 error_message=str(exc),
             )
             await service.db.commit()
+            await service._persist_workflow_run_events(
+                execution=execution,
+                workflow_instance=workflow_instance,
+                callbacks=callbacks,
+            )
         finally:
             WorkflowTaskRegistry.unregister(execution.run_id)
             if live_event_buffer is not None:
