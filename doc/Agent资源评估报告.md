@@ -1,8 +1,35 @@
 # Agent资源评估报告（2026-03-10 Agent生产化收口版）
 
-- 报告版本：v6.1
+- 报告版本：v6.2
 - 评估方式：基于当前工作树代码审查、架构收口、定向回归测试与现有 Agent 文档更新
 - 当前结论：**Agent 资源已经达到生产级主链路水准，可按生产基线验收；但仍不单独宣称“极致性能已证明”或“已完全等同 Coze 全平台”。**
+
+---
+
+## 0. 2026-03-24 持久化粒度复核结论
+
+在 2026-03-21 热路径复核之后，本轮又对 Agent 的 durable event 粒度和 Resource Runtime 统一心智做了一轮收口，目标不是改变 AG-UI 行为，而是让 durable 数据面只保留“最小回放周期有价值”的事件。
+
+本轮已落地的点：
+
+- Agent 流热路径仍保持原有模型：
+  - `event_sink` / live buffer
+  - `generator_manager.put(...)`
+  - 运行结束后批量持久化
+- durable event 现已改为**显式白名单**
+- 以下高频事件继续实时发送，但不再进入 durable event log：
+  - `TEXT_MESSAGE_CONTENT`
+  - `REASONING_MESSAGE_CONTENT`
+  - `TOOL_CALL_ARGS`
+  - `ACTIVITY_DELTA`
+  - `STATE_DELTA`
+- `active-run`、`/live`、断连不 cancel、checkpoint 恢复、session 锁等既有生产语义保持不变
+
+当前判断：
+
+- **Agent 的热路径生产语义没有回退**
+- **Agent durable event 数据量较之前更可控**
+- **本轮改动属于“减冗余而不降能力”的收敛**
 
 ---
 
@@ -119,6 +146,8 @@
 ### 3.3 Event / Tool History
 
 - `ai_agent_run_events` 持久化 AG-UI 关键事件时间线
+  - 当前已明确**不再追求 token/chunk 级 durable 镜像**
+  - durable event 以“最小回放周期有价值”的事件为准
 - `ai_agent_tool_executions` 持久化 tool/step 执行历史
 - 可用于：
   - run detail

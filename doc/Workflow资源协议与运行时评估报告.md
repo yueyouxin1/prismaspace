@@ -1,10 +1,64 @@
 # Workflow资源协议与运行时评估报告（2026-03-20）
 
-- 报告版本：v1.1
+- 报告版本：v1.2
 - 评估方式：基于当前工作树代码审查、现有文档比对与运行时契约梳理
 - 核心结论：**初版评估指出的“Workflow 缺正式协议层和统一 service 分层”问题，现已完成第一阶段收口；当前主要剩余项转为前端运行中心、UIAPP host 和 future profile。**
 - 最终建议：**不要把 Workflow 原生协议直接等同于 AG-UI；应新增一套 Workflow 专用标准协议，并为 Agent 节点提供 AG-UI 兼容层，同时给未来 Chat Flow 预留扩展位。**
 - 当前落地：**WRP v1 已固化为对内协议说明；后端默认协议已收口到 `wrp`，请求边界显式 `protocol`，且 `run_query / run_control / run_preparation / run_execution` 已落地。**
+
+---
+
+## 0. 2026-03-24 Runtime 对齐与数据面复核结论
+
+在 2026-03-21 第一阶段协议/运行时收口之后，本轮继续围绕两件事情推进：
+
+1. 让 Workflow 的热路径与 Agent 采用一致心智
+2. 让 Workflow 的 durable 数据入口与 service 边界进一步向 Agent 对齐
+
+本轮已落地的点：
+
+- Workflow 已新增独立 `persisting_callbacks.py`
+  - 流热路径改为：
+    - live sink
+    - generator emit
+    - 内存 captured
+    - terminal 后批量 durable 持久化
+- Workflow 已新增 `run_persistence.py`
+  - `events / latest interrupt / latest checkpoint / node executions / run summary/detail` 均逐步收口到 run-level persistence facade
+- `event_log_service.py` 已被收口删除
+  - 上层不再依赖“事件日志服务”这一单独概念
+- `stream_live_run_events()` 已对齐 Agent
+  - live attach 只走 live buffer
+  - 不再保留 DB fallback
+- Workflow durable event 已改为显式白名单
+  - `stream.delta` 不再做 durable 持久化
+- `execution_succeeded` checkpoint 已开始压缩
+  - 成功态 checkpoint 不再保存完整 resume 级 state
+  - 失败 / 中断 / 取消等恢复相关场景仍保留完整 state
+- `orchestrator -> runtime_observer` 的边界保持不变
+  - 生命周期信号仍由引擎完整发出
+  - “是否落库”继续由 observer / persistence 层决策
+
+本轮同时完成了一轮数据面消费检查，结论是：
+
+- `trace_id`
+  - 有真实消费面，不能简单删除
+- `latest_checkpoint`
+  - 有真实消费面，且仍服务 resume 元信息
+- `node_executions`
+  - 有真实消费面，不能在当前阶段直接取消
+
+因此本轮判断是：
+
+- **没有丢失此前已完成的协议化与恢复能力成果**
+- **当前热路径比 3 月 21 日版本更轻，且架构边界更清晰**
+- **当前仍保持生产级主链路可用**
+- **但关于 `traces / node_executions / checkpoints` 的进一步去冗余，仍应保持保守，不宜在缺乏充分证据时继续激进削减**
+
+说明：
+
+- 若下文旧章节与本节冲突，以本节和当前代码实现为准。
+- 下文保留大量历史评估上下文，用于解释为什么这轮收口是必要的。
 
 ---
 
@@ -93,7 +147,8 @@
 - `src/app/services/resource/workflow/workflow_service.py`
 - `src/app/services/resource/workflow/runtime_runner.py`
 - `src/app/services/resource/workflow/runtime_persistence.py`
-- `src/app/services/resource/workflow/event_log_service.py`
+- `src/app/services/resource/workflow/run_persistence.py`
+- `src/app/services/resource/workflow/persisting_callbacks.py`
 - `src/app/engine/workflow/runtime_ir.py`
 - `src/app/engine/workflow/orchestrator.py`
 - `src/app/models/resource/workflow/event.py`

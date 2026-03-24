@@ -1,24 +1,15 @@
 from __future__ import annotations
 
-import asyncio
-import logging
 from typing import Any, Dict, List, Optional
-
-from pydantic import ValidationError
 
 from app.models import ResourceExecutionStatus
 from app.schemas.resource.workflow.workflow_schemas import (
     WorkflowEventRead,
     WorkflowExecutionRequest,
-    WorkflowInterruptRead,
-    WorkflowRunNodeRead,
     WorkflowRunRead,
     WorkflowRunSummaryRead,
 )
 from app.services.exceptions import NotFoundError, ServiceException
-
-
-logger = logging.getLogger(__name__)
 
 
 class WorkflowRunQueryService:
@@ -28,50 +19,6 @@ class WorkflowRunQueryService:
 
     def __init__(self, workflow_service):
         self.workflow_service = workflow_service
-
-    def build_run_summary(self, execution, latest_checkpoint) -> WorkflowRunSummaryRead:
-        service = self.workflow_service
-        status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
-        return WorkflowRunSummaryRead(
-            run_id=execution.run_id,
-            thread_id=execution.thread_id,
-            parent_run_id=execution.parent_run_id,
-            status=status_value,
-            trace_id=execution.trace_id,
-            error_code=execution.error_code,
-            error_message=execution.error_message,
-            started_at=execution.started_at,
-            finished_at=execution.finished_at,
-            latest_checkpoint=service.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
-        )
-
-    async def get_latest_interrupt(
-        self,
-        *,
-        execution_id: int,
-    ) -> Optional[WorkflowInterruptRead]:
-        service = self.workflow_service
-        latest_interrupt = await service.run_persistence_service.get_latest_event(
-            execution_id=execution_id,
-            event_type="run.interrupted",
-        )
-        if latest_interrupt is None:
-            latest_interrupt = await service.run_persistence_service.get_latest_event(
-                execution_id=execution_id,
-                event_type="interrupt",
-            )
-        if latest_interrupt is None or not isinstance(latest_interrupt.payload, dict):
-            return None
-
-        interrupt_payload = latest_interrupt.payload.get("interrupt")
-        if not isinstance(interrupt_payload, dict):
-            return None
-
-        try:
-            return WorkflowInterruptRead.model_validate(interrupt_payload)
-        except ValidationError:
-            logger.warning("Invalid persisted workflow interrupt payload for execution %s", execution_id, exc_info=True)
-            return None
 
     async def resolve_resume_payload(
         self,
@@ -90,7 +37,9 @@ class WorkflowRunQueryService:
                 raise ServiceException("Resume token thread mismatch.")
 
         resume_payload = execute_params.resume.output
-        interrupt = await self.get_latest_interrupt(execution_id=parent_execution.id)
+        interrupt = await self.workflow_service.run_persistence_service.get_latest_interrupt(
+            execution_id=parent_execution.id,
+        )
         resume_key = None
         if interrupt is not None and isinstance(interrupt.payload, dict):
             payload_resume_key = interrupt.payload.get("resumeOutputKey")
@@ -119,12 +68,13 @@ class WorkflowRunQueryService:
 
         await service._check_execute_perm(workflow_instance)
 
-        latest_checkpoint = await service.runtime_persistence.get_latest_checkpoint(execution_id=execution.id)
-        node_executions = await service.runtime_persistence.node_execution_dao.get_list(
-            where={"resource_execution_id": execution.id},
-            order=["id"],
+        latest_checkpoint = await service.run_persistence_service.get_latest_checkpoint(execution_id=execution.id)
+        node_executions = await service.run_persistence_service.list_node_executions(
+            execution_id=execution.id,
         )
-        interrupt = await self.get_latest_interrupt(execution_id=execution.id)
+        interrupt = await service.run_persistence_service.get_latest_interrupt(
+            execution_id=execution.id,
+        )
 
         status_value = execution.status.value if hasattr(execution.status, "value") else str(execution.status)
         can_resume = status_value in {
@@ -133,20 +83,11 @@ class WorkflowRunQueryService:
             ResourceExecutionStatus.INTERRUPTED.value,
         } and latest_checkpoint is not None
 
-        return WorkflowRunRead(
-            run_id=execution.run_id,
-            thread_id=execution.thread_id,
-            parent_run_id=execution.parent_run_id,
-            status=status_value,
-            trace_id=execution.trace_id,
-            error_code=execution.error_code,
-            error_message=execution.error_message,
-            started_at=execution.started_at,
-            finished_at=execution.finished_at,
-            workflow_instance_uuid=workflow_instance.uuid,
-            workflow_name=workflow_instance.name,
-            latest_checkpoint=service.runtime_persistence.build_checkpoint_read(execution=execution, checkpoint=latest_checkpoint) if latest_checkpoint else None,
-            node_executions=[WorkflowRunNodeRead.model_validate(item) for item in node_executions],
+        return service.run_persistence_service.build_run_detail(
+            execution=execution,
+            workflow_instance=workflow_instance,
+            latest_checkpoint=latest_checkpoint,
+            node_executions=node_executions,
             can_resume=can_resume,
             interrupt=interrupt,
         )
@@ -194,79 +135,8 @@ class WorkflowRunQueryService:
             raise NotFoundError("Workflow instance not found.")
         await service._check_execute_perm(workflow_instance)
 
-        current_seq = after_seq
-        seen_terminal_event = False
         async for envelope in service.live_event_service.stream_events(run_id, after_seq=after_seq):
-            try:
-                current_seq = max(current_seq, int(envelope.get("seq", current_seq)))
-            except Exception:
-                pass
-            payload = envelope.get("payload", {})
-            if isinstance(payload, dict) and str(payload.get("event", "")) in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
-                seen_terminal_event = True
             yield envelope
-
-        for event in await service.run_persistence_service.list_events_after_sequence(
-            execution_id=execution.id,
-            after_sequence_no=current_seq,
-            limit=1000,
-        ):
-            if event.event_type in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
-                seen_terminal_event = True
-            yield {
-                "seq": event.sequence_no,
-                "payload": {
-                    "event": event.event_type,
-                    "data": event.payload,
-                },
-            }
-
-        if not seen_terminal_event:
-            for _ in range(50):
-                await service.db.refresh(execution)
-
-                for event in await service.run_persistence_service.list_events_after_sequence(
-                    execution_id=execution.id,
-                    after_sequence_no=current_seq,
-                    limit=1000,
-                ):
-                    current_seq = max(current_seq, event.sequence_no)
-                    if event.event_type in {"run.finished", "run.failed", "run.interrupted", "run.cancelled", "system.error"}:
-                        seen_terminal_event = True
-                    yield {
-                        "seq": event.sequence_no,
-                        "payload": {
-                            "event": event.event_type,
-                            "data": event.payload,
-                        },
-                    }
-
-                if seen_terminal_event:
-                    break
-
-                terminal_event_type = {
-                    ResourceExecutionStatus.SUCCEEDED: "run.finished",
-                    ResourceExecutionStatus.INTERRUPTED: "run.interrupted",
-                    ResourceExecutionStatus.CANCELLED: "run.cancelled",
-                    ResourceExecutionStatus.FAILED: "run.failed",
-                }.get(execution.status)
-                if terminal_event_type is not None:
-                    terminal_event = await service.run_persistence_service.get_latest_event(
-                        execution_id=execution.id,
-                        event_type=terminal_event_type,
-                    )
-                    if terminal_event is not None and terminal_event.sequence_no >= after_seq:
-                        seen_terminal_event = True
-                        yield {
-                            "seq": terminal_event.sequence_no,
-                            "payload": {
-                                "event": terminal_event.event_type,
-                                "data": terminal_event.payload,
-                            },
-                        }
-                        break
-
-                await asyncio.sleep(0.1)
 
     async def list_runs(
         self,
@@ -291,6 +161,11 @@ class WorkflowRunQueryService:
 
         summaries: List[WorkflowRunSummaryRead] = []
         for execution in rows:
-            latest_checkpoint = await service.runtime_persistence.get_latest_checkpoint(execution_id=execution.id)
-            summaries.append(self.build_run_summary(execution, latest_checkpoint))
+            latest_checkpoint = await service.run_persistence_service.get_latest_checkpoint(execution_id=execution.id)
+            summaries.append(
+                service.run_persistence_service.build_run_summary(
+                    execution=execution,
+                    latest_checkpoint=latest_checkpoint,
+                )
+            )
         return summaries

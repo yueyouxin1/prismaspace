@@ -52,6 +52,24 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
     负责事件推送、状态追踪和运行期消息持久化。
     """
 
+    DURABLE_EVENT_TYPES = {
+        "RUN_STARTED",
+        "RUN_FINISHED",
+        "RUN_ERROR",
+        "MESSAGES_SNAPSHOT",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_END",
+        "REASONING_START",
+        "REASONING_MESSAGE_START",
+        "REASONING_MESSAGE_END",
+        "REASONING_END",
+        "REASONING_ENCRYPTED_VALUE",
+        "TOOL_CALL_START",
+        "TOOL_CALL_END",
+        "TOOL_CALL_RESULT",
+        "ACTIVITY_SNAPSHOT",
+    }
+
     def __init__(
         self,
         usage_accumulator: UsageAccumulator,
@@ -127,7 +145,8 @@ class PersistingAgentCallbacks(AgentEngineCallbacks):
         if hasattr(event, "model_dump"):
             payload = event.model_dump(mode="json", by_alias=True, exclude_none=True)
             event_type = payload.get("type", "RAW")
-            self._captured_events.append({"event_type": event_type, "payload": payload})
+            if event_type in self.DURABLE_EVENT_TYPES:
+                self._captured_events.append({"event_type": event_type, "payload": payload})
             if self.event_sink is not None:
                 await self.event_sink(payload)
         await self.generator_manager.put(event)

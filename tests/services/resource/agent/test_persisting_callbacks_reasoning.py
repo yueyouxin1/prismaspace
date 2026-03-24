@@ -559,6 +559,33 @@ async def test_callbacks_cancel_checker_aborts_event_emission():
 
 
 @pytest.mark.asyncio
+async def test_callbacks_do_not_capture_high_frequency_delta_events():
+    generator = AsyncGeneratorManager()
+    callbacks = PersistingAgentCallbacks(
+        usage_accumulator=UsageAccumulator(),
+        generator_manager=generator,
+        session_manager=None,
+        trace_id="trace-1",
+        run_id="run-1",
+        run_input=_build_run_input(),
+    )
+
+    await callbacks.on_final_chunk_generated("hello")
+
+    start_payload = (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+    content_payload = (await generator.get()).model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    assert start_payload["type"] == "TEXT_MESSAGE_START"
+    assert content_payload["type"] == "TEXT_MESSAGE_CONTENT"
+    assert callbacks.get_captured_events() == [
+        {
+            "event_type": "TEXT_MESSAGE_START",
+            "payload": start_payload,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_callbacks_capture_engine_level_runtime_checkpoint_snapshot():
     callbacks = PersistingAgentCallbacks(
         usage_accumulator=UsageAccumulator(),

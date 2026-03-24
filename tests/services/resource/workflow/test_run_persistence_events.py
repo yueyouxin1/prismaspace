@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.resource.workflow.event_log_service import WorkflowEventLogService
+from app.services.resource.workflow.run_persistence import WorkflowRunPersistenceService
 
 
 pytestmark = pytest.mark.asyncio
@@ -23,9 +23,9 @@ async def test_append_events_for_ids_batches_sequence_and_flush_once():
         async def flush(self):
             flush_calls.append("flush")
 
-    service = WorkflowEventLogService.__new__(WorkflowEventLogService)
+    service = WorkflowRunPersistenceService.__new__(WorkflowRunPersistenceService)
     service.db = FakeDb()
-    service.dao = FakeDao()
+    service.event_dao = FakeDao()
 
     await service.append_events_for_ids(
         execution_id=11,

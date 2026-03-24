@@ -32,12 +32,7 @@ async def test_workflow_callbacks_emit_and_capture_without_db_persistence():
     assert event.data == {"chunk": "A", "run_id": "run-1", "thread_id": "thread-1"}
     assert event.id == "1"
     assert sink_payloads == [{"event": "stream.delta", "data": event.data}]
-    assert callbacks.get_captured_events() == [
-        {
-            "event_type": "stream.delta",
-            "payload": {"chunk": "A", "run_id": "run-1", "thread_id": "thread-1"},
-        }
-    ]
+    assert callbacks.get_captured_events() == []
 
 
 async def test_workflow_callbacks_enrich_node_state_events():
@@ -63,3 +58,9 @@ async def test_workflow_callbacks_enrich_node_state_events():
     )
     event = await generator.get()
     assert event.data["node"]["id"] == "node-1"
+    assert callbacks.get_captured_events() == [
+        {
+            "event_type": "node.started",
+            "payload": event.data,
+        }
+    ]

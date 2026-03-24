@@ -988,16 +988,6 @@ class WorkflowService(ResourceImplementationService):
             existing_run_id=existing_run_id,
         )
 
-    def _to_run_summary(self, execution, latest_checkpoint) -> WorkflowRunSummaryRead:
-        return self.run_query_service.build_run_summary(execution, latest_checkpoint)
-
-    async def _get_latest_interrupt(
-        self,
-        *,
-        execution_id: int,
-    ) -> Optional[WorkflowInterruptRead]:
-        return await self.run_query_service.get_latest_interrupt(execution_id=execution_id)
-
     async def _resolve_resume_payload(
         self,
         *,

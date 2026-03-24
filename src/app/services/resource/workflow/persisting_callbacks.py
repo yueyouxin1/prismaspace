@@ -18,6 +18,23 @@ class PersistingWorkflowCallbacks(WorkflowCallbacks):
     persist them in batch after the run reaches a terminal state.
     """
 
+    DURABLE_EVENT_TYPES = {
+        "run.started",
+        "run.finished",
+        "run.failed",
+        "run.cancelled",
+        "run.interrupted",
+        "node.started",
+        "node.completed",
+        "node.failed",
+        "node.skipped",
+        "stream.started",
+        "stream.finished",
+        "checkpoint.created",
+        "interrupt",
+        "system.error",
+    }
+
     def __init__(
         self,
         *,
@@ -61,12 +78,13 @@ class PersistingWorkflowCallbacks(WorkflowCallbacks):
                 "event": event.event,
                 "data": event.data,
             }
-            self._captured_events.append(
-                {
-                    "event_type": event.event,
-                    "payload": event.data,
-                }
-            )
+            if event.event in self.DURABLE_EVENT_TYPES:
+                self._captured_events.append(
+                    {
+                        "event_type": event.event,
+                        "payload": event.data,
+                    }
+                )
             if self.event_sink is not None:
                 envelope = await self.event_sink(envelope_payload)
                 if isinstance(envelope, dict) and envelope.get("seq") is not None:

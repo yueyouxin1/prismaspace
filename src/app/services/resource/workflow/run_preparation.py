@@ -64,12 +64,12 @@ class WorkflowRunPreparationService:
                 execute_params=execute_params,
             )
 
-            checkpoint = await service.runtime_persistence.get_latest_checkpoint(execution_id=parent_execution.id)
+            checkpoint = await service.run_persistence_service.get_latest_checkpoint(execution_id=parent_execution.id)
             if checkpoint is None:
                 raise ServiceException("No checkpoint available for resume.")
 
             runtime_plan = WorkflowRuntimePlan.model_validate(checkpoint.runtime_plan)
-            restored_snapshot = service.runtime_persistence.build_resume_snapshot(
+            restored_snapshot = service.run_persistence_service.build_resume_snapshot(
                 checkpoint=checkpoint,
                 runtime_plan=runtime_plan,
             )

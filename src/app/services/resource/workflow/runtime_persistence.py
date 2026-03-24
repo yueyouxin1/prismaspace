@@ -64,6 +64,33 @@ class WorkflowRuntimePersistenceService(BaseService):
             )
         return json.loads(json.dumps(value, default=str, ensure_ascii=False))
 
+    @staticmethod
+    def _compact_checkpoint_state(
+        *,
+        reason: WorkflowCheckpointReason,
+        runtime_plan: WorkflowRuntimePlan,
+        snapshot: WorkflowRuntimeSnapshot,
+    ) -> tuple[Any, Any, Any, Any, Any]:
+        if reason != WorkflowCheckpointReason.EXECUTION_SUCCEEDED:
+            return (
+                runtime_plan,
+                snapshot.payload or {},
+                snapshot.variables or {},
+                snapshot.node_states or {},
+                snapshot.ready_queue or [],
+            )
+
+        # Succeeded runs do not need full resume-grade state. Keep a compact
+        # terminal checkpoint for query surfaces while avoiding a second full
+        # copy of the completed runtime snapshot.
+        return (
+            {"compacted": True, "reason": reason.value},
+            dict(snapshot.payload or {}),
+            {},
+            {},
+            [],
+        )
+
     async def upsert_node_execution(
         self,
         *,
@@ -121,17 +148,24 @@ class WorkflowRuntimePersistenceService(BaseService):
         reason: WorkflowCheckpointReason,
         node_id: Optional[str] = None,
     ) -> WorkflowExecutionCheckpoint:
+        runtime_plan_state, payload_state, variables_state, node_states_state, ready_queue_state = (
+            self._compact_checkpoint_state(
+                reason=reason,
+                runtime_plan=runtime_plan,
+                snapshot=snapshot,
+            )
+        )
         checkpoint = WorkflowExecutionCheckpoint(
             resource_execution_id=execution_id,
             workflow_instance_id=workflow_instance_id,
             step_index=snapshot.step_index,
             reason=reason,
             node_id=node_id,
-            runtime_plan=self._jsonable(runtime_plan),
-            payload=self._jsonable(snapshot.payload) or {},
-            variables=self._jsonable(snapshot.variables) or {},
-            node_states=self._jsonable(snapshot.node_states) or {},
-            ready_queue=self._jsonable(snapshot.ready_queue) or [],
+            runtime_plan=self._jsonable(runtime_plan_state),
+            payload=self._jsonable(payload_state) or {},
+            variables=self._jsonable(variables_state) or {},
+            node_states=self._jsonable(node_states_state) or {},
+            ready_queue=self._jsonable(ready_queue_state) or [],
         )
         self.db.add(checkpoint)
         await self.db.flush()

@@ -162,7 +162,10 @@ class WorkflowRunExecutionService:
             await service.db.commit()
             raise ServiceException(f"Failed to enqueue workflow run: {exc}") from exc
 
-        return service.run_query_service.build_run_summary(prepared["execution"], latest_checkpoint=None)
+        return service.run_persistence_service.build_run_summary(
+            execution=prepared["execution"],
+            latest_checkpoint=None,
+        )
 
     def _build_callbacks(
         self,
